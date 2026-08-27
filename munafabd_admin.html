@@ -1,0 +1,1676 @@
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>MunafaBD Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://clickincome-b5e2d-default-rtdb.firebaseio.com" crossorigin>
+<link rel="dns-prefetch" href="https://identitytoolkit.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getDatabase, ref, set, get, update, push, remove, runTransaction, query, orderByChild, equalTo }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBy2grpQfrKE__DVBOlTEsOH2LP3caibhk",
+  authDomain: "clickincome-b5e2d.firebaseapp.com",
+  databaseURL: "https://clickincome-b5e2d-default-rtdb.firebaseio.com",
+  projectId: "clickincome-b5e2d",
+  storageBucket: "clickincome-b5e2d.firebasestorage.app",
+  messagingSenderId: "709263130801",
+  appId: "1:709263130801:web:877fde0c18ee2320606290",
+  measurementId: "G-R9200R5EHB"
+};
+
+const ADMIN_EMAIL = "yy1103536@gmail.com";
+const ADMIN_PASS  = "yasin123";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getDatabase(app);
+
+window._FB = { auth, db, ref, set, get, update, push, remove, runTransaction };
+window._currentUID = '';
+window.H   = (id) => document.getElementById(id);
+window._welcomePopup = { enabled:true, icon:'🎉', title:'MunafaBD-এ স্বাগতম!', message:'আপনার অ্যাকাউন্টে লগইন করুন।', btn:'শুরু করুন ✅' };
+window.fmt = (n)  => parseFloat(n||0).toLocaleString('bn-BD');
+
+// ── BACK BUTTON PREVENTION ──
+window._adminPage = 'dashboard';
+history.pushState({ page: 'dashboard' }, '', location.href);
+window.addEventListener('popstate', function(e) {
+  history.pushState({ page: window._adminPage }, '', location.href);
+  if (!window._currentUID) return;
+  const modal = H('modalContainer');
+  if (modal && modal.innerHTML.trim() !== '') { closeModal(); return; }
+  if (window._adminPage !== 'dashboard') { renderDashboard(); }
+});
+window.toast = (msg, type='info') => {
+  let t = document.createElement('div');
+  t.style.cssText = `position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+    padding:10px 20px;border-radius:50px;font-size:13px;font-weight:600;z-index:9999;
+    background:${type==='ok'?'rgba(15,230,168,0.92)':type==='err'?'rgba(255,77,109,0.92)':'rgba(124,58,237,0.92)'};
+    color:#fff;box-shadow:0 6px 20px rgba(0,0,0,0.3);white-space:nowrap;max-width:90vw;text-align:center;`;
+  t.textContent = msg; document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2800);
+};
+window.closeModal = () => H('modalContainer').innerHTML = '';
+
+// ── SURFACE SILENT FAILURES (e.g. Firebase permission-denied) ──
+// Card clicks call async functions like adminUsers() with no try/catch.
+// If a Firebase call is rejected (rules mismatch, etc.), the click looked
+// like it did nothing. This shows a toast instead of failing silently.
+window.addEventListener('unhandledrejection', function(e){
+  console.error(e.reason);
+  const msg = (e.reason && e.reason.message) ? e.reason.message : String(e.reason);
+  toast('ত্রুটি: ' + msg, 'err');
+  e.preventDefault();
+});
+
+// ── AUTH ──
+window.setupAdmin = async () => {
+  const btn = H('setupBtn'); btn.disabled = true; btn.textContent = 'সেটআপ হচ্ছে...';
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, ADMIN_EMAIL, ADMIN_PASS);
+    await set(ref(db, `users/${cred.user.uid}`), {
+      uid: cred.user.uid, name:'Admin', email: ADMIN_EMAIL, phone:'', role:'admin',
+      earningBalance:0, depositBalance:0, status:'active', createdAt: Date.now()
+    });
+    toast('অ্যাডমিন অ্যাকাউন্ট তৈরি হয়েছে ✅','ok');
+  } catch(e) {
+    if (e.code === 'auth/email-already-in-use') toast('অ্যাডমিন অ্যাকাউন্ট আগেই আছে, লগইন করুন','info');
+    else toast('সেটআপ ব্যর্থ: '+e.message,'err');
+  }
+  btn.disabled = false; btn.textContent = '🛡️ অ্যাডমিন সেটআপ (একবার)';
+};
+
+onAuthStateChanged(auth, async (fireUser) => {
+  if (fireUser) {
+    window._currentUID = fireUser.uid;
+    // Fetch the admin profile and popup settings in parallel instead of one
+    // after another — saves a full network round trip on every login.
+    let [snap, ppSnap] = await Promise.all([
+      get(ref(db, `users/${fireUser.uid}`)),
+      get(ref(db,'settings/welcomePopup'))
+    ]);
+    if (fireUser.email === ADMIN_EMAIL && (!snap.exists() || snap.val().role !== 'admin')) {
+      const prev = snap.exists() ? snap.val() : {};
+      // Migrate legacy single 'balance' field (old schema) into earningBalance so nothing is lost
+      const legacyBal = Number(prev.balance||0);
+      await set(ref(db, `users/${fireUser.uid}`), {
+        uid: fireUser.uid, name:'Admin', email: ADMIN_EMAIL, phone:'', role:'admin',
+        earningBalance: Number(prev.earningBalance||0) + legacyBal,
+        depositBalance: Number(prev.depositBalance||0),
+        status:'active',
+        createdAt: prev.createdAt||Date.now()
+      });
+      snap = await get(ref(db, `users/${fireUser.uid}`));
+    }
+    if (!snap.exists() || snap.val().role !== 'admin') {
+      await signOut(auth); toast('অ্যাডমিন অ্যাক্সেস নেই','err'); return;
+    }
+    if (ppSnap.exists()) window._welcomePopup = ppSnap.val();
+    H('authScreen').classList.add('hidden');
+    H('app').classList.remove('hidden');
+    H('loading').classList.add('hidden');
+    renderDashboard();
+    setTimeout(() => updateAdminNotifBadge(), 500);
+  } else {
+    window._currentUID = '';
+    H('loading').classList.add('hidden');
+    H('authScreen').classList.remove('hidden');
+    H('app').classList.add('hidden');
+  }
+});
+
+window.doLogin = async () => {
+  const email = H('loginEmail').value.trim();
+  const pass  = H('loginPass').value;
+  if (!email||!pass) { toast('ইমেইল ও পাসওয়ার্ড দিন','err'); return; }
+  const btn = H('loginBtn'); btn.disabled = true; btn.textContent = 'লগইন হচ্ছে...';
+  try {
+    await signInWithEmailAndPassword(auth, email, pass);
+  } catch(e) {
+    toast('ইমেইল বা পাসওয়ার্ড ভুল','err');
+    btn.disabled = false; btn.textContent = 'লগইন করুন →';
+  }
+};
+window.doLogout = async () => { await signOut(auth); };
+
+// ══ ADMIN NOTIFICATION PANEL ══
+window._adminNotifOpen = false;
+
+window.updateAdminNotifBadge = async () => {
+  try {
+    const snap = await get(ref(db, `adminNotifications`));
+    let count = 0;
+    if (snap.exists()) snap.forEach(c => { if (!c.val().seen) count++; });
+    const b = H('adminNotifBadge');
+    if (b) {
+      if (count > 0) { b.textContent = count > 9 ? '9+' : count; b.classList.remove('hidden'); }
+      else b.classList.add('hidden');
+    }
+  } catch(e) {}
+};
+
+window.toggleAdminNotifPanel = async () => {
+  const panel = H('adminNotifPanel');
+  window._adminNotifOpen = !window._adminNotifOpen;
+  if (window._adminNotifOpen) {
+    panel.classList.remove('hidden');
+    await loadAdminNotifs();
+  } else {
+    panel.classList.add('hidden');
+  }
+};
+
+window.loadAdminNotifs = async () => {
+  const box = H('adminNotifList');
+  box.innerHTML = '<div style="color:var(--text3);text-align:center;padding:20px;font-size:13px">লোড হচ্ছে...</div>';
+  try {
+    const snap = await get(ref(db, 'adminNotifications'));
+    if (!snap.exists()) { box.innerHTML = '<div style="color:var(--text3);text-align:center;padding:20px;font-size:13px">কোনো নোটিফিকেশন নেই</div>'; return; }
+    const items = [];
+    snap.forEach(c => { items.push({ key: c.key, ...c.val() }); });
+    items.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    const updates = {};
+    items.forEach(n => { if (!n.seen) updates[`adminNotifications/${n.key}/seen`] = true; });
+    if (Object.keys(updates).length) await update(ref(db), updates);
+    await updateAdminNotifBadge();
+    box.innerHTML = items.slice(0, 30).map(n => `
+      <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:flex-start;background:${n.seen ? 'none' : 'rgba(124,58,237,0.08)'}">
+        <div style="font-size:11px;line-height:1.6;flex:1;color:var(--text)">${n.msg || ''}</div>
+        <div style="font-size:10px;color:var(--text3);white-space:nowrap;flex-shrink:0">${n.date || ''}</div>
+      </div>`).join('') || '<div style="color:var(--text3);text-align:center;padding:20px;font-size:13px">কোনো নোটিফিকেশন নেই</div>';
+  } catch(e) { box.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px;font-size:13px">লোড ব্যর্থ</div>'; }
+};
+
+window.markAllAdminNotifsRead = async () => {
+  try {
+    const snap = await get(ref(db, 'adminNotifications'));
+    if (!snap.exists()) return;
+    const updates = {};
+    snap.forEach(c => { updates[`adminNotifications/${c.key}/seen`] = true; });
+    await update(ref(db), updates);
+    await loadAdminNotifs();
+    toast('সব পড়া হয়েছে ✅', 'ok');
+  } catch(e) { toast('সমস্যা হয়েছে', 'err'); }
+};
+
+// ══ DASHBOARD ══
+window.renderDashboard = async () => {
+  window._adminPage = 'dashboard';
+  // users has no cheap way to get aggregate balances without a full read, but
+  // the three request logs only ever need to yield today's pending count here —
+  // querying by status:'pending' pulls just those rows instead of the entire
+  // (ever-growing) history of approved/rejected requests too.
+  // NOTE: for this query to be fast server-side rather than just client-filtered,
+  // add `"depositRequests"/"withdrawRequests"/"loanRequests": {".indexOn": "status"}`
+  // under those paths in the Realtime Database rules, if not already present.
+  const [usersSnap, depSnap, witSnap, loanSnap] = await Promise.all([
+    get(ref(db,'users')),
+    get(query(ref(db,'depositRequests'), orderByChild('status'), equalTo('pending'))),
+    get(query(ref(db,'withdrawRequests'), orderByChild('status'), equalTo('pending'))),
+    get(query(ref(db,'loanRequests'), orderByChild('status'), equalTo('pending')))
+  ]);
+
+  let userCount=0, totalEarning=0, totalDeposit=0;
+  if (usersSnap.exists()) usersSnap.forEach(c=>{ const u=c.val(); if(u.role!=='admin'){ userCount++; totalEarning+=Number(u.earningBalance||0); totalDeposit+=Number(u.depositBalance||0); }});
+
+  const pendingDep = depSnap.exists() ? depSnap.size : 0;
+  const pendingWit = witSnap.exists() ? witSnap.size : 0;
+  const pendingLoan = loanSnap.exists() ? loanSnap.size : 0;
+
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="dash-header">
+      <div>
+        <h2 style="margin-bottom:2px">⚙️ Dashboard</h2>
+        <p style="color:var(--text2);font-size:12px">MunafaBD Admin Panel</p>
+      </div>
+      <button class="btn-logout" onclick="doLogout()">🚪 লগআউট</button>
+    </div>
+
+    <div class="stat-row">
+      <div class="stat-box"><div class="stat-lbl">মোট ইউজার</div><div class="stat-val">${fmt(userCount)}</div></div>
+      <div class="stat-box">
+        <div class="stat-lbl">মোট ব্যালেন্স</div>
+        <div class="stat-val green" style="font-size:15px">🟢 আর্নিং ৳${fmt(totalEarning)}</div>
+        <div class="stat-val" style="font-size:15px;color:var(--cyan);margin-top:2px">🔵 ডিপোজিট ৳${fmt(totalDeposit)}</div>
+      </div>
+      <div class="stat-box click" onclick="adminDeposits()">
+        <div class="stat-lbl">পেন্ডিং ডিপোজিট</div>
+        <div class="stat-val amber">${fmt(pendingDep)}${pendingDep>0?'<span class="bdot"></span>':''}</div>
+      </div>
+      <div class="stat-box click" onclick="adminWithdraws()">
+        <div class="stat-lbl">পেন্ডিং উইথড্র</div>
+        <div class="stat-val red">${fmt(pendingWit)}${pendingWit>0?'<span class="bdot"></span>':''}</div>
+      </div>
+      <div class="stat-box click" onclick="adminLoans()">
+        <div class="stat-lbl">পেন্ডিং লোন</div>
+        <div class="stat-val amber">${fmt(pendingLoan)}${pendingLoan>0?'<span class="bdot"></span>':''}</div>
+      </div>
+    </div>
+
+    <div class="sec-title">ব্যবস্থাপনা</div>
+    <div class="admin-grid">
+      <div class="admin-card" onclick="renderAdminFolder('users')">
+        <div class="ac-icon">👥</div><h4>ইউজার ও লেনদেন</h4>
+        <p>${(pendingDep+pendingWit)>0?`<span class="amber">${pendingDep+pendingWit} পেন্ডিং</span>`:'ইউজার, ডিপোজিট, উইথড্র'}</p>
+      </div>
+      <div class="admin-card" onclick="renderAdminFolder('loan')">
+        <div class="ac-icon">🏦</div><h4>লোন</h4>
+        <p>${pendingLoan>0?`<span class="amber">${pendingLoan} পেন্ডিং</span>`:'রিকোয়েস্ট ও সেটিংস'}</p>
+      </div>
+      <div class="admin-card" onclick="renderAdminFolder('promo')"><div class="ac-icon">📢</div><h4>প্রচার ও যোগাযোগ</h4><p>রেফারেল, নোটিফিকেশন, নোটিস</p></div>
+      <div class="admin-card" onclick="renderAdminFolder('site')"><div class="ac-icon">⚙️</div><h4>সাইট কনফিগারেশন</h4><p>পেমেন্ট, টাইমার, পপআপ, শেয়ার</p></div>
+    </div>
+  </div>`;
+};
+window.adminBack = () => { window._adminPage = 'dashboard'; renderDashboard(); }
+
+// ══ SETTINGS FOLDERS (grouped admin-card categories) ══
+window._adminFolders = {
+  users: { icon:'👥', title:'ইউজার ও লেনদেন', items:[
+    { icon:'👥', title:'ব্যবহারকারী', desc:'ব্যালেন্স ও স্ট্যাটাস', action:'adminUsers' },
+    { icon:'⬇️', title:'ডিপোজিট', desc:'সব ঠিক আছে', action:'adminDeposits' },
+    { icon:'⬆️', title:'উইথড্র', desc:'সব ঠিক আছে', action:'adminWithdraws' }
+  ]},
+  loan: { icon:'🏦', title:'লোন', items:[
+    { icon:'🏦', title:'লোন রিকোয়েস্ট', desc:'সব ঠিক আছে', action:'adminLoans' },
+    { icon:'⚙️', title:'লোন সেটিংস', desc:'লিমিট, চার্জ, মেয়াদ', action:'adminLoanSettings' }
+  ]},
+  promo: { icon:'📢', title:'প্রচার ও যোগাযোগ', items:[
+    { icon:'🔗', title:'রেফারেল', desc:'রেফারেল ট্র্যাক', action:'adminReferrals' },
+    { icon:'🔔', title:'নোটিফিকেশন', desc:'সবাইকে পাঠান', action:'adminNotify' },
+    { icon:'📢', title:'নোটিস মার্কি', desc:'হোমপেজ নোটিস', action:'adminNoticeSettings' }
+  ]},
+  site: { icon:'⚙️', title:'সাইট কনফিগারেশন', items:[
+    { icon:'💳', title:'পেমেন্ট নম্বর', desc:'bKash / Nagad', action:'adminPaymentSettings' },
+    { icon:'🕐', title:'সাইট সেটিংস', desc:'টাইমার তারিখ', action:'adminSiteSettings' },
+    { icon:'👋', title:'ওয়েলকাম পপআপ', desc:window._welcomePopup.enabled?'✅ চালু':'❌ বন্ধ', action:'adminPopupSettings' },
+    { icon:'🛒', title:'Buy Share', desc:'থাম্বনেইল ও কাউন্টডাউন', action:'adminBuyShareSettings' }
+  ]}
+};
+
+window.renderAdminFolder = async (key) => {
+  window._adminPage = 'dashboard';
+  const folder = window._adminFolders[key];
+  if (!folder) { renderDashboard(); return; }
+
+  H('mainContent').innerHTML = `<div class="page"><div class="loading-txt">লোড হচ্ছে...</div></div>`;
+
+  let pendingDep=0, pendingWit=0, pendingLoan=0;
+  if (key === 'users' || key === 'loan') {
+    const [depSnap, witSnap, loanSnap] = await Promise.all([
+      get(ref(db,'depositRequests')), get(ref(db,'withdrawRequests')), get(ref(db,'loanRequests'))
+    ]);
+    if(depSnap.exists()) depSnap.forEach(c=>{ if(c.val().status==='pending') pendingDep++; });
+    if(witSnap.exists()) witSnap.forEach(c=>{ if(c.val().status==='pending') pendingWit++; });
+    if(loanSnap.exists()) loanSnap.forEach(c=>{ if(c.val().status==='pending') pendingLoan++; });
+  }
+  const dynamicDesc = {
+    adminDeposits: pendingDep>0?`<span class="amber">${pendingDep} পেন্ডিং</span>`:'সব ঠিক আছে',
+    adminWithdraws: pendingWit>0?`<span class="red">${pendingWit} পেন্ডিং</span>`:'সব ঠিক আছে',
+    adminLoans: pendingLoan>0?`<span class="amber">${pendingLoan} পেন্ডিং</span>`:'সব ঠিক আছে',
+    adminPopupSettings: window._welcomePopup.enabled?'✅ চালু':'❌ বন্ধ'
+  };
+
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="renderDashboard()">← ড্যাশবোর্ড</div>
+    <h2 style="margin-bottom:16px">${folder.icon} ${folder.title}</h2>
+    <div class="admin-grid">
+      ${folder.items.map(it => `<div class="admin-card" onclick="${it.action}()"><div class="ac-icon">${it.icon}</div><h4>${it.title}</h4><p>${dynamicDesc[it.action] || it.desc}</p></div>`).join('')}
+    </div>
+  </div>`;
+};
+
+// ══ USERS ══
+window._userCache = [];
+window._shareStats = {};
+window.adminUsers = async () => {
+  window._adminPage = 'users';
+  const [snap, shareSnap] = await Promise.all([
+    get(ref(db,'users')),
+    get(ref(db,'myShares'))
+  ]);
+  const users = [];
+  if(snap.exists()) snap.forEach(c=>{ const u=c.val(); if(u.role!=='admin') users.push(u); });
+  users.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+
+  const now = Date.now();
+  const stats = {};
+  if (shareSnap.exists()) shareSnap.forEach(u => {
+    let total = 0, active = 0;
+    u.forEach(s => { total++; if ((s.val().endTime||0) > now) active++; });
+    stats[u.key] = { total, active };
+  });
+  window._shareStats = stats;
+  window._userCache = users;
+  renderUserList(users);
+};
+
+window.renderUserList = (users) => {
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:14px">👥 ব্যবহারকারী (${users.length}জন)</h2>
+    <div class="form-group" style="margin-bottom:14px">
+      <input id="userSearch" class="form-input" placeholder="🔍 নাম বা ইমেইল দিয়ে খুঁজুন..." oninput="filterUsers()">
+    </div>
+    <div id="userListBox">${userListHtml(users)}</div>
+  </div>`;
+};
+
+function userListHtml(users) {
+  if (!users.length) return '<p style="color:var(--text3);text-align:center;padding:20px">কোনো ব্যবহারকারী নেই</p>';
+  return users.map(u=>{
+    const st = window._shareStats[u.uid] || { total:0, active:0 };
+    return `
+    <div class="req-card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:40px;height:40px;border-radius:50%;background:var(--g1);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex-shrink:0">${(u.name||'?')[0].toUpperCase()}</div>
+          <div>
+            <div style="font-weight:600;font-size:14px">${u.name||'নাম নেই'} <span class="pill" style="background:${u.status==='active'?'rgba(15,230,168,0.15)':'rgba(255,77,109,0.15)'};color:${u.status==='active'?'var(--green)':'var(--red)'};">${u.status==='active'?'✅':'⛔'}</span></div>
+            <div style="font-size:11px;color:var(--text2)">${u.email||''}</div>
+            <div style="font-size:11px;color:var(--text3)">${u.phone||'—'} ${u.referralCode?'• 🔖 '+u.referralCode:''}</div>
+            <div style="font-size:13px;color:var(--green);font-weight:700">🟢 আর্নিং: ৳${fmt(u.earningBalance)}</div>
+            <div style="font-size:13px;color:var(--cyan);font-weight:700">🔵 ডিপোজিট: ৳${fmt(u.depositBalance)}</div>
+            <div style="font-size:11px;color:var(--text2);margin-top:2px">🛒 মোট শেয়ার: ${st.total} • <span style="color:var(--green)">✅ সক্রিয়: ${st.active}</span></div>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-accent2 btn-sm" onclick="editUserBalance('${u.uid}',${Number(u.earningBalance)||0},${Number(u.depositBalance)||0},'${(u.name||'user').replace(/'/g,"\\'")}')">💰 ব্যালেন্স</button>
+          <button class="btn ${u.status==='active'?'btn-red':'btn-green'} btn-sm" onclick="toggleUserStatus('${u.uid}','${u.status||'active'}')">${u.status==='active'?'⛔ Block':'✅ Unblock'}</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+window.filterUsers = () => {
+  const q = H('userSearch').value.trim().toLowerCase();
+  const filtered = window._userCache.filter(u => (u.name||'').toLowerCase().includes(q)||(u.email||'').toLowerCase().includes(q)||(u.phone||'').includes(q));
+  H('userListBox').innerHTML = userListHtml(filtered);
+};
+
+window.toggleUserStatus = async (uid, status) => {
+  const newS = status==='active'?'disabled':'active';
+  if (newS==='disabled' && !confirm('এই ইউজারকে Block করতে চান?')) return;
+  await update(ref(db,`users/${uid}`), {status:newS});
+  await push(ref(db,`notifications/${uid}`), {
+    msg: newS==='disabled'?'⛔ আপনার অ্যাকাউন্ট সাময়িকভাবে নিষ্ক্রিয় করা হয়েছে।':'✅ আপনার অ্যাকাউন্ট পুনরায় সক্রিয় করা হয়েছে।',
+    seen:false, date:'এইমাত্র', ts:Date.now()
+  });
+  toast(newS==='disabled'?'Block করা হয়েছে':'Unblock করা হয়েছে','ok');
+  adminUsers();
+};
+
+window.editUserBalance = (uid, earningBal, depositBal, name) => {
+  H('modalContainer').innerHTML = `<div class="modal-bg" onclick="event.target===this&&closeModal()">
+    <div class="modal">
+      <div class="modal-handle"></div>
+      <span class="modal-close" onclick="closeModal()">✕</span>
+      <div class="modal-title">💰 ব্যালেন্স — ${name}</div>
+      <div class="form-group"><label>কোন ব্যালেন্স?</label>
+        <select id="balField" class="form-input" onchange="H('balCurrent').value='৳'+fmt(this.value==='earningBalance'?${Number(earningBal)||0}:${Number(depositBal)||0})">
+          <option value="earningBalance">🟢 আর্নিং ব্যালেন্স (৳${fmt(earningBal)}) — উইথড্রযোগ্য</option>
+          <option value="depositBalance">🔵 ডিপোজিট ব্যালেন্স (৳${fmt(depositBal)}) — উইথড্র অযোগ্য</option>
+        </select>
+      </div>
+      <div class="form-group"><label>বর্তমান ব্যালেন্স</label><input id="balCurrent" class="form-input" value="৳${fmt(earningBal)}" disabled></div>
+      <div class="form-group"><label>পরিবর্তনের ধরন</label>
+        <select id="balType" class="form-input">
+          <option value="credit">➕ যোগ করুন</option>
+          <option value="debit">➖ কর্তন করুন</option>
+          <option value="set">✏️ সরাসরি সেট করুন</option>
+        </select>
+      </div>
+      <div class="form-group"><label>পরিমাণ (৳)</label><input id="balAmt" class="form-input" type="number" placeholder="0"></div>
+      <div class="form-group"><label>কারণ</label><input id="balReason" class="form-input" placeholder="যেমন: বোনাস, Task পেমেন্ট..."></div>
+      <button class="btn btn-green" id="balSaveBtn" onclick="saveUserBalance('${uid}')">💾 আপডেট করুন</button>
+    </div>
+  </div>`;
+};
+
+window.saveUserBalance = async (uid) => {
+  const field  = H('balField').value; // 'earningBalance' or 'depositBalance'
+  const type   = H('balType').value;
+  const amt    = Number(H('balAmt').value||0);
+  const label  = field==='earningBalance' ? 'আর্নিং ব্যালেন্স' : 'ডিপোজিট ব্যালেন্স';
+  const reason = H('balReason').value.trim() || (type==='credit'?`${label} যোগ`:type==='debit'?`${label} কর্তন`:`${label} সংশোধন`);
+  if (!amt && type!=='set') { toast('পরিমাণ দিন','err'); return; }
+  const btn = H('balSaveBtn'); btn.disabled=true; btn.textContent='আপডেট হচ্ছে...';
+  try {
+    // ── SECURE BALANCE UPDATE ──
+    // Read-modify-write happens inside a single Firebase transaction on the
+    // exact field being changed, so the "before" value used for credit/debit/set
+    // math always matches what's actually in the database at write time —
+    // an admin editing this user in another tab (or a user's own transfer
+    // firing at the same instant) can't cause a lost update.
+    let histType, histAmt;
+    const txRes = await runTransaction(ref(db, `users/${uid}/${field}`), (cur) => {
+      const c = Number(cur)||0;
+      if (type==='credit'){ histType='credit'; histAmt=amt; return c+amt; }
+      if (type==='debit'){ histType='debit'; histAmt=amt; return Math.max(0,c-amt); }
+      histType = amt>=c?'credit':'debit'; histAmt=Math.abs(amt-c); return amt;
+    });
+    if (!txRes.committed) { toast('আপডেট ব্যর্থ হয়েছে, আবার চেষ্টা করুন','err'); btn.disabled=false; btn.textContent='💾 আপডেট করুন'; return; }
+    const newBal = Number(txRes.snapshot.val()||0);
+    await push(ref(db,`balanceHistory/${uid}`), { type:histType, amount:histAmt, reason:`${reason} (${label})`, balanceAfter:newBal, date:'এইমাত্র', ts:Date.now() });
+    await push(ref(db,`notifications/${uid}`), { msg:`💰 ${label} আপডেট হয়েছে। নতুন ব্যালেন্স: ৳${fmt(newBal)} (${reason})`, seen:false, date:'এইমাত্র', ts:Date.now() });
+    toast('ব্যালেন্স আপডেট হয়েছে ✅','ok');
+    closeModal(); adminUsers();
+  } catch(e){ toast('সমস্যা হয়েছে','err'); btn.disabled=false; btn.textContent='💾 আপডেট করুন'; }
+};
+
+// ══ REFERRALS ══
+window.adminReferrals = async () => {
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:4px">🔗 রেফারেল সিস্টেম</h2>
+    <p style="color:var(--text2);font-size:12px;margin-bottom:16px">কে কাকে রেফার করেছেন</p>
+    <div id="refListBox"><div class="loading-txt">লোড হচ্ছে...</div></div>
+  </div>`;
+
+  const snap = await get(ref(db,'users'));
+  const users = {}, referrers = {};
+  if(snap.exists()) snap.forEach(c=>{
+    const u = c.val();
+    if(u.role !== 'admin') {
+      users[c.key] = u;
+      if(u.referrerUID) {
+        if(!referrers[u.referrerUID]) referrers[u.referrerUID] = [];
+        referrers[u.referrerUID].push(u);
+      }
+    }
+  });
+
+  const box = H('refListBox');
+  const refEntries = Object.entries(referrers);
+  if(!refEntries.length){ box.innerHTML='<div class="empty-state">কোনো রেফারেল নেই</div>'; return; }
+
+  box.innerHTML = refEntries.map(([refUID, members])=>{
+    const refUser = users[refUID];
+    if(!refUser) return '';
+    return `<div class="req-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div>
+          <div style="font-weight:700;font-size:14px">${refUser.name||'অজানা'}</div>
+          <div style="font-size:11px;color:var(--text2)">${refUser.email||''}</div>
+          <div style="font-size:12px;color:var(--cyan);font-weight:600;margin-top:3px">🔖 ${refUser.referralCode||'—'}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:var(--green)">৳${fmt(members.length*50)}</div>
+          <div style="font-size:11px;color:var(--text3)">${members.length} জন রেফার</div>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:10px">
+        ${members.map(m=>`
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(160,120,255,0.06)">
+            <div>
+              <div style="font-size:13px;font-weight:500">${m.name||'নাম নেই'}</div>
+              <div style="font-size:10px;color:var(--text3)">${m.phone||m.email||'—'}</div>
+            </div>
+            <span style="font-size:11px;color:${m.status==='active'?'var(--green)':'var(--red)'};font-weight:600">${m.status==='active'?'✅':'⛔'}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }).join('');
+};
+
+// ══ DEPOSIT ══
+window.adminDeposits = async () => {
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:10px">⬇️ ডিপোজিট রিকোয়েস্ট</h2>
+    <div class="filter-tabs">
+      <button class="ftab active" onclick="loadDeposits('pending',this)">⏳ পেন্ডিং</button>
+      <button class="ftab" onclick="loadDeposits('approved',this)">✅ অনুমোদিত</button>
+      <button class="ftab" onclick="loadDeposits('rejected',this)">❌ বাতিল</button>
+    </div>
+    <div id="depListBox"><div class="loading-txt">লোড হচ্ছে...</div></div>
+  </div>`;
+  loadDeposits('pending', document.querySelector('.ftab.active'));
+};
+
+window.loadDeposits = async (statusFilter, btnEl) => {
+  document.querySelectorAll('.ftab').forEach(b=>b.classList.remove('active'));
+  if(btnEl) btnEl.classList.add('active');
+  const box = H('depListBox');
+  box.innerHTML = '<div class="loading-txt">লোড হচ্ছে...</div>';
+  const [snap, usersSnap] = await Promise.all([get(ref(db,'depositRequests')), get(ref(db,'users'))]);
+  const items = [];
+  if(snap.exists()) snap.forEach(c=>{ const v=c.val(); if(v.status===statusFilter) items.push({key:c.key,...v}); });
+  items.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const userMap = {};
+  if(usersSnap.exists()) usersSnap.forEach(c=>{ const u=c.val(); userMap[u.uid]=u; });
+  if(!items.length){ box.innerHTML=`<div class="empty-state">কোনো রিকোয়েস্ট নেই</div>`; return; }
+  const stColor={approved:'var(--green)',rejected:'var(--red)',pending:'var(--amber)'};
+  const stIcon ={approved:'✅',rejected:'❌',pending:'⏳'};
+  const stText ={approved:'অনুমোদিত',rejected:'বাতিল',pending:'পেন্ডিং'};
+  box.innerHTML = items.map(d=>{
+    const u = userMap[d.uid]||{};
+    return `<div class="req-card">
+      <div class="req-header">
+        <div>
+          <div style="font-weight:700;font-size:15px">৳${fmt(d.amount)}</div>
+          <div style="font-size:11px;color:var(--text2)">${u.name||'অজানা'} • ${u.email||d.uid.slice(0,8)}</div>
+        </div>
+        <span class="status-chip" style="color:${stColor[d.status]};border-color:${stColor[d.status]}40;background:${stColor[d.status]}15">${stIcon[d.status]} ${stText[d.status]}</span>
+      </div>
+      <div class="req-meta">
+        <span>💳 ${d.method==='bkash'?'bKash':'Nagad'}</span>
+        <span>🔖 TX: <strong>${d.txId||'—'}</strong></span>
+        <span>🕐 ${new Date(d.ts||0).toLocaleString('bn-BD')}</span>
+      </div>
+      ${d.status==='pending'?`<div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn btn-green btn-sm" style="flex:1" onclick="approveDeposit('${d.key}','${d.uid}',${d.amount})">✅ অনুমোদন</button>
+        <button class="btn btn-red btn-sm" style="flex:1" onclick="rejectDeposit('${d.key}','${d.uid}',${d.amount})">❌ বাতিল</button>
+      </div>`:''}
+    </div>`;
+  }).join('');
+};
+
+window.approveDeposit = async (key, uid, amount) => {
+  if(!confirm(`৳${fmt(amount)} ডিপোজিট অনুমোদন করবেন?`)) return;
+  try {
+    // ── SECURE APPROVAL: LOCK THE REQUEST FIRST ──
+    // Flip pending → approved inside a transaction on the request's own status
+    // field, so a double-click or two admins acting at the same moment can't
+    // both pass the pending-check and credit the deposit twice.
+    const lockTx = await runTransaction(ref(db, `depositRequests/${key}/status`), (cur) => {
+      // Firebase may invoke this callback with cur === null on its first optimistic
+      // pass (no cached knowledge of the real server value yet) — that is NOT the
+      // same as the request being genuinely already processed. Only abort when we
+      // KNOW for certain (from a real, synced value) that it's not 'pending'; on
+      // null, proceed and let Firebase's built-in conflict detection re-invoke this
+      // callback with the true value if it turns out someone else already handled it.
+      if (cur !== null && cur !== 'pending') return; // genuinely already handled — abort, no write
+      return 'approved';
+    });
+    if (!lockTx.committed) { toast('এই রিকোয়েস্টটি ইতিমধ্যে প্রসেস হয়েছে','err'); loadDeposits('pending', document.querySelector('.ftab.active')); return; }
+    await update(ref(db,`depositRequests/${key}`), {approvedAt:Date.now()});
+
+    // ── SECURE BALANCE UPDATE ──
+    // Deposit money always lands in depositBalance (never earningBalance),
+    // and the credit runs as a transaction on that exact field so it's always
+    // applied on top of the live value, never a stale get() snapshot.
+    const txRes = await runTransaction(ref(db, `users/${uid}/depositBalance`), (cur) => (Number(cur)||0) + amount);
+    const newBal = Number(txRes.snapshot.val()||0);
+    await push(ref(db,`balanceHistory/${uid}`), {type:'credit', amount, reason:'ডিপোজিট অনুমোদিত', balanceAfter:newBal, date:'এইমাত্র', ts:Date.now()});
+    await push(ref(db,`notifications/${uid}`), {msg:`✅ আপনার ৳${fmt(amount)} ডিপোজিট অনুমোদিত! নতুন ডিপোজিট ব্যালেন্স: ৳${fmt(newBal)}`, seen:false, date:'এইমাত্র', ts:Date.now()});
+
+    // ── LOAN ELIGIBILITY COUNTERS ── keeps the user's lifetime deposit total, and
+    // (on their first-ever approved deposit) their referrer's "real referral" count,
+    // in sync for the Loan Eligibility feature. Wrapped separately so a failure here
+    // never blocks the deposit approval itself, which has already succeeded above.
+    try {
+      await runTransaction(ref(db, `users/${uid}/totalApprovedDeposit`), (cur) => (Number(cur)||0) + amount);
+      const uSnap = await get(ref(db, `users/${uid}`));
+      const uData = uSnap.exists() ? uSnap.val() : {};
+      if (uData.referrerUID && !uData.referralCounted) {
+        const depSnap = await get(ref(db, 'depositRequests'));
+        let approvedCount = 0;
+        if (depSnap.exists()) depSnap.forEach(c => { const v = c.val(); if (v.uid === uid && v.status === 'approved') approvedCount++; });
+        if (approvedCount === 1) {
+          await runTransaction(ref(db, `users/${uData.referrerUID}/realReferralCount`), (cur) => (Number(cur)||0) + 1);
+          await update(ref(db, `users/${uid}`), { referralCounted: true });
+        }
+      }
+    } catch(e) {}
+
+    toast('ডিপোজিট অনুমোদিত ✅','ok');
+    loadDeposits('pending', document.querySelector('.ftab.active'));
+  } catch(e){ toast('সমস্যা হয়েছে','err'); }
+};
+
+window.rejectDeposit = async (key, uid, amount) => {
+  if(!confirm(`৳${fmt(amount)} ডিপোজিট বাতিল করবেন?`)) return;
+  try {
+    await update(ref(db,`depositRequests/${key}`), {status:'rejected', rejectedAt:Date.now()});
+    await push(ref(db,`notifications/${uid}`), {msg:`❌ আপনার ৳${fmt(amount)} ডিপোজিট বাতিল হয়েছে।`, seen:false, date:'এইমাত্র', ts:Date.now()});
+    toast('ডিপোজিট বাতিল করা হয়েছে','ok');
+    loadDeposits('pending', document.querySelector('.ftab.active'));
+  } catch(e){ toast('সমস্যা হয়েছে','err'); }
+};
+
+// ══ WITHDRAW ══
+window.adminWithdraws = async () => {
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:10px">⬆️ উইথড্র রিকোয়েস্ট</h2>
+    <div class="filter-tabs">
+      <button class="ftab active" onclick="loadWithdraws('pending',this)">⏳ পেন্ডিং</button>
+      <button class="ftab" onclick="loadWithdraws('approved',this)">✅ প্রদান করা হয়েছে</button>
+      <button class="ftab" onclick="loadWithdraws('rejected',this)">❌ বাতিল</button>
+    </div>
+    <div id="witListBox"><div class="loading-txt">লোড হচ্ছে...</div></div>
+  </div>`;
+  loadWithdraws('pending', document.querySelector('.ftab.active'));
+};
+
+window.loadWithdraws = async (statusFilter, btnEl) => {
+  document.querySelectorAll('.ftab').forEach(b=>b.classList.remove('active'));
+  if(btnEl) btnEl.classList.add('active');
+  const box = H('witListBox');
+  box.innerHTML = '<div class="loading-txt">লোড হচ্ছে...</div>';
+  const [snap, usersSnap] = await Promise.all([get(ref(db,'withdrawRequests')), get(ref(db,'users'))]);
+  const items = [];
+  if(snap.exists()) snap.forEach(c=>{ const v=c.val(); if(v.status===statusFilter) items.push({key:c.key,...v}); });
+  items.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const userMap = {};
+  if(usersSnap.exists()) usersSnap.forEach(c=>{ const u=c.val(); userMap[u.uid]=u; });
+  if(!items.length){ box.innerHTML=`<div class="empty-state">কোনো রিকোয়েস্ট নেই</div>`; return; }
+
+  // ── BALANCE RECONCILIATION CHECK (per user in this list) ──
+  // Same logic as the detail page: sum every balanceHistory credit/debit for
+  // the user and compare to their live balance. A live balance higher than
+  // history can explain means money landed there outside every normal flow —
+  // flag it right on the card so the admin sees it before even opening the
+  // request, let alone approving it.
+  const uniqueUIDs = [...new Set(items.map(w=>w.uid))];
+  const suspiciousMap = {};
+  await Promise.all(uniqueUIDs.map(async (uid) => {
+    const histSnap = await get(ref(db, `balanceHistory/${uid}`));
+    let credit = 0, debit = 0;
+    if (histSnap.exists()) histSnap.forEach(c => {
+      const h = c.val();
+      if (h.type === 'credit') credit += Number(h.amount||0);
+      else if (h.type === 'debit') debit += Number(h.amount||0);
+    });
+    const u = userMap[uid] || {};
+    const actual = Number(u.earningBalance||0) + Number(u.depositBalance||0);
+    suspiciousMap[uid] = (actual - (credit - debit)) > 0.5;
+  }));
+
+  const stColor={approved:'var(--green)',rejected:'var(--red)',pending:'var(--amber)'};
+  const stIcon ={approved:'✅',rejected:'❌',pending:'⏳'};
+  const stText ={approved:'প্রদান করা হয়েছে',rejected:'বাতিল',pending:'পেন্ডিং'};
+  box.innerHTML = items.map(w=>{
+    const u = userMap[w.uid]||{};
+    const safeName = (u.name||'অজানা').replace(/'/g,"\\'");
+    const flagged = suspiciousMap[w.uid];
+    return `<div class="req-card" style="cursor:pointer;${flagged?'border-color:var(--red)':''}" onclick="viewUserFinancials('${w.uid}','${safeName}')">
+      ${flagged?`<div style="background:rgba(255,77,109,0.15);color:var(--red);font-size:11px;font-weight:700;padding:6px 10px;border-radius:8px;margin-bottom:9px">⚠️ ব্যালেন্স গরমিল — হিস্টোরির চেয়ে বেশি ব্যালেন্স, অনুমোদনের আগে যাচাই করুন</div>`:''}
+      <div class="req-header">
+        <div>
+          <div style="font-weight:700;font-size:15px">৳${fmt(w.amount)}</div>
+          <div style="font-size:11px;color:var(--text2)">${u.name||'অজানা'} • ${u.email||w.uid.slice(0,8)}</div>
+        </div>
+        <span class="status-chip" style="color:${stColor[w.status]};border-color:${stColor[w.status]}40;background:${stColor[w.status]}15">${stIcon[w.status]} ${stText[w.status]}</span>
+      </div>
+      <div class="req-meta">
+        <span>💳 ${w.method==='bkash'?'bKash':'Nagad'}</span>
+        <span>📱 <strong>${w.accNumber||'—'}</strong></span>
+        <span>🟢 আর্নিং ৳${fmt(u.earningBalance||0)}</span>
+      </div>
+      <div style="font-size:11px;color:var(--accent2);margin-top:8px">👁️ বিস্তারিত দেখতে কার্ডে ট্যাপ করুন</div>
+      ${w.status==='pending'?`<div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn btn-green btn-sm" style="flex:1" onclick="event.stopPropagation();approveWithdraw('${w.key}','${w.uid}',${w.amount})">✅ পেমেন্ট নিশ্চিত</button>
+        <button class="btn btn-red btn-sm" style="flex:1" onclick="event.stopPropagation();rejectWithdraw('${w.key}','${w.uid}',${w.amount})">❌ বাতিল</button>
+      </div>`:''}
+    </div>`;
+  }).join('');
+};
+
+// ══ USER FINANCIAL DETAIL (deposit history, earning breakdown, total earned) ══
+// Opened by tapping a withdraw request card — gives the admin the full picture
+// (all deposits, every earning credit and where it came from, lifetime total
+// earned) needed to sanity-check a withdraw request before approving it.
+window.viewUserFinancials = async (uid, name) => {
+  window._adminPage = 'userFinancials';
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminWithdraws()">← ফিরে যান</div>
+    <div class="skeleton-loader">⏳ লোড হচ্ছে...</div>
+  </div>`;
+
+  const [uSnap, histSnap, depSnap] = await Promise.all([
+    get(ref(db, `users/${uid}`)),
+    get(ref(db, `balanceHistory/${uid}`)),
+    get(ref(db, 'depositRequests'))
+  ]);
+  const u = uSnap.exists() ? uSnap.val() : {};
+
+  const hist = [];
+  if (histSnap.exists()) histSnap.forEach(c => hist.push(c.val()));
+  hist.sort((a,b)=>(b.ts||0)-(a.ts||0));
+
+  const deposits = [];
+  if (depSnap.exists()) depSnap.forEach(c => { const v=c.val(); if (v.uid===uid) deposits.push({key:c.key,...v}); });
+  deposits.sort((a,b)=>(b.ts||0)-(a.ts||0));
+
+  // Every reason string for an earning-side credit carries "আর্নিং" (admin
+  // edits) or "রেফারেল" (referral bonus) — that's the only signal available
+  // since balanceHistory doesn't tag which balance field an entry hit, so we
+  // classify off the reason text the same way the rest of the app writes it.
+  const isEarningReason = (r) => /আর্নিং|রেফারেল/.test(r||'');
+  const earningEntries = hist.filter(h => h.type==='credit' && isEarningReason(h.reason));
+  const totalEarned = earningEntries.reduce((s,h)=>s+Number(h.amount||0),0);
+  const totalDeposited = deposits.filter(d=>d.status==='approved').reduce((s,d)=>s+Number(d.amount||0),0);
+
+  // ── BALANCE RECONCILIATION ──
+  // Every legitimate balance change anywhere in the app (deposit approval,
+  // withdraw approval, admin edit, referral bonus, share purchase) writes a
+  // balanceHistory entry for the exact amount. So summing all of them should
+  // always equal the account's current total balance. If the live total is
+  // HIGHER than that sum, some of it got there without going through any of
+  // those flows — e.g. a direct write to the database — which is exactly
+  // what we want the admin to catch before approving a withdrawal.
+  const totalCredits = hist.filter(h=>h.type==='credit').reduce((s,h)=>s+Number(h.amount||0),0);
+  const totalDebits  = hist.filter(h=>h.type==='debit').reduce((s,h)=>s+Number(h.amount||0),0);
+  const expectedTotal = totalCredits - totalDebits;
+  const actualTotal = Number(u.earningBalance||0) + Number(u.depositBalance||0);
+  const balanceDiff = actualTotal - expectedTotal;
+
+  const stColor={approved:'var(--green)',rejected:'var(--red)',pending:'var(--amber)'};
+  const stIcon ={approved:'✅',rejected:'❌',pending:'⏳'};
+  const stText ={approved:'অনুমোদিত',rejected:'বাতিল',pending:'পেন্ডিং'};
+
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminWithdraws()">← ফিরে যান</div>
+
+    ${balanceDiff > 0.5 ? `<div class="card" style="border-color:var(--red);background:rgba(255,77,109,0.08)">
+      <div style="font-weight:700;color:var(--red);margin-bottom:5px">⚠️ ব্যালেন্স গরমিল সনাক্ত হয়েছে!</div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.6">এই ইউজারের বর্তমান মোট ব্যালেন্স (৳${fmt(actualTotal)}) তার লেনদেন হিস্টোরি দিয়ে ব্যাখ্যা করা যায় এমন পরিমাণের (৳${fmt(expectedTotal)}) চেয়ে <strong>৳${fmt(balanceDiff)} বেশি</strong>। অর্থাৎ এই টাকা কোনো deposit approval, admin credit, রেফারেল বোনাস — কোনোটার মাধ্যমেই আসেনি। ডাটাবেসে সরাসরি পরিবর্তন / hack-এর সম্ভাবনা আছে। <strong>Withdraw approve করার আগে অবশ্যই ম্যানুয়ালি যাচাই করুন।</strong></div>
+    </div>` : (Math.abs(balanceDiff) > 0.5 ? `<div class="card" style="border-color:var(--amber)">
+      <div style="font-weight:700;color:var(--amber);margin-bottom:5px">ℹ️ সামান্য গরমিল</div>
+      <div style="font-size:12px;color:var(--text2)">হিস্টোরি অনুযায়ী প্রত্যাশিত ব্যালেন্স ৳${fmt(expectedTotal)}, বর্তমান ব্যালেন্স ৳${fmt(actualTotal)}।</div>
+    </div>` : '')}
+
+    <div class="card" style="text-align:center;padding:22px">
+      <div style="width:56px;height:56px;border-radius:50%;background:var(--g1);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:22px;margin:0 auto 10px">${(u.name||name||'?')[0].toUpperCase()}</div>
+      <div style="font-weight:700;font-size:16px">${u.name||name||'অজানা'}</div>
+      <div style="font-size:12px;color:var(--text2)">${u.email||''}</div>
+      <div style="font-size:12px;color:var(--text3)">${u.phone||'—'}</div>
+    </div>
+
+    <div class="stat-row">
+      <div class="stat-box"><div class="sec-title" style="margin-bottom:4px">🟢 বর্তমান আর্নিং</div><div style="font-size:17px;font-weight:700;color:var(--green)">৳${fmt(u.earningBalance)}</div></div>
+      <div class="stat-box"><div class="sec-title" style="margin-bottom:4px">🔵 বর্তমান ডিপোজিট</div><div style="font-size:17px;font-weight:700;color:var(--cyan)">৳${fmt(u.depositBalance)}</div></div>
+    </div>
+    <div class="stat-row">
+      <div class="stat-box"><div class="sec-title" style="margin-bottom:4px">🎯 সর্বমোট Earning</div><div style="font-size:17px;font-weight:700;color:#f59e0b">৳${fmt(totalEarned)}</div></div>
+      <div class="stat-box"><div class="sec-title" style="margin-bottom:4px">📥 সর্বমোট Deposit (অনুমোদিত)</div><div style="font-size:17px;font-weight:700;color:var(--cyan)">৳${fmt(totalDeposited)}</div></div>
+    </div>
+
+    <div class="sec-title">🎯 কিভাবে Earning করেছে</div>
+    <div style="margin-bottom:18px">
+      ${earningEntries.length ? earningEntries.map(h=>`
+        <div class="req-card" style="padding:12px 14px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+            <div style="font-size:13px;font-weight:600">${h.reason||''}</div>
+            <div style="font-size:13px;font-weight:700;color:var(--green);white-space:nowrap">+৳${fmt(h.amount)}</div>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:3px">${h.date||''} • তখনকার ব্যালেন্স: ৳${fmt(h.balanceAfter)}</div>
+        </div>`).join('') : `<div class="empty-state">এখনো কোনো earning নেই</div>`}
+    </div>
+
+    <div class="sec-title">🔵 ডিপোজিট হিস্টোরি</div>
+    <div>
+      ${deposits.length ? deposits.map(d=>`
+        <div class="req-card" style="padding:12px 14px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+            <div>
+              <div style="font-size:13px;font-weight:700">৳${fmt(d.amount)}</div>
+              <div class="req-meta" style="margin-top:6px">
+                <span>💳 ${d.method==='bkash'?'bKash':'Nagad'}</span>
+                <span>🔖 TX: <strong>${d.txId||'—'}</strong></span>
+                <span>🕐 ${new Date(d.ts||0).toLocaleString('bn-BD')}</span>
+              </div>
+            </div>
+            <span class="status-chip" style="color:${stColor[d.status]};border-color:${stColor[d.status]}40;background:${stColor[d.status]}15">${stIcon[d.status]} ${stText[d.status]}</span>
+          </div>
+        </div>`).join('') : `<div class="empty-state">এখনো কোনো ডিপোজিট নেই</div>`}
+    </div>
+  </div>`;
+};
+
+window.approveWithdraw = async (key, uid, amount) => {
+  if(!confirm(`৳${fmt(amount)} উইথড্র নিশ্চিত করবেন?`)) return;
+  try {
+    // ── SECURE APPROVAL: LOCK THE REQUEST FIRST ──
+    // Same double-click / two-admin protection as approveDeposit.
+    const lockTx = await runTransaction(ref(db, `withdrawRequests/${key}/status`), (cur) => {
+      // See approveDeposit for why null must not be treated as "already processed".
+      if (cur !== null && cur !== 'pending') return;
+      return 'approved';
+    });
+    if (!lockTx.committed) { toast('এই রিকোয়েস্টটি ইতিমধ্যে প্রসেস হয়েছে','err'); loadWithdraws('pending', document.querySelector('.ftab.active')); return; }
+
+    // ── SECURE BALANCE UPDATE ──
+    // Withdraw can only ever come out of earningBalance — depositBalance is
+    // never withdrawable, so it's never touched here. The sufficient-funds
+    // check is re-verified inside the transaction against the live value, so
+    // a second concurrent withdraw approval can't push the balance negative.
+    let insufficient = false;
+    const txRes = await runTransaction(ref(db, `users/${uid}/earningBalance`), (cur) => {
+      const c = Number(cur)||0;
+      if (c < amount) { insufficient = true; return; } // abort — no write
+      return c - amount;
+    });
+    if (insufficient || !txRes.committed) {
+      // release the lock so this request can be retried or rejected properly
+      await update(ref(db,`withdrawRequests/${key}`), {status:'pending'});
+      toast('পর্যাপ্ত আর্নিং ব্যালেন্স নেই','err');
+      loadWithdraws('pending', document.querySelector('.ftab.active'));
+      return;
+    }
+    await update(ref(db,`withdrawRequests/${key}`), {approvedAt:Date.now()});
+    const newBal = Number(txRes.snapshot.val()||0);
+    // ── LOAN ELIGIBILITY COUNTER ── keeps users/$uid/totalApprovedWithdraws in
+    // sync so the user-side Loan Eligibility checklist's Withdraw Count row is accurate.
+    try { await runTransaction(ref(db, `users/${uid}/totalApprovedWithdraws`), (cur) => (Number(cur)||0) + 1); } catch(e) {}
+    await push(ref(db,`balanceHistory/${uid}`), {type:'debit', amount, reason:'উইথড্র সম্পন্ন', balanceAfter:newBal, date:'এইমাত্র', ts:Date.now()});
+    await push(ref(db,`notifications/${uid}`), {msg:`✅ আপনার ৳${fmt(amount)} উইথড্র সম্পন্ন হয়েছে!`, seen:false, date:'এইমাত্র', ts:Date.now()});
+    toast('উইথড্র অনুমোদিত ✅','ok');
+    loadWithdraws('pending', document.querySelector('.ftab.active'));
+  } catch(e){ toast('সমস্যা হয়েছে','err'); }
+};
+
+window.rejectWithdraw = async (key, uid, amount) => {
+  if(!confirm(`৳${fmt(amount)} উইথড্র বাতিল করবেন?`)) return;
+  try {
+    await update(ref(db,`withdrawRequests/${key}`), {status:'rejected', rejectedAt:Date.now()});
+    await push(ref(db,`notifications/${uid}`), {msg:`❌ আপনার ৳${fmt(amount)} উইথড্র বাতিল হয়েছে।`, seen:false, date:'এইমাত্র', ts:Date.now()});
+    toast('উইথড্র বাতিল','ok');
+    loadWithdraws('pending', document.querySelector('.ftab.active'));
+  } catch(e){ toast('সমস্যা হয়েছে','err'); }
+};
+
+// ══ LOAN MANAGEMENT ══
+// Recomputes late fee / remaining amount for an approved loan based on elapsed
+// time past dueTs, and persists it — keeps admin and user views in sync
+// without needing a server-side cron job.
+window.refreshLoanRecord = async (loan, settings) => {
+  if (loan.status !== 'approved') { loan._isOverdue = false; return loan; }
+  const now = Date.now();
+  const dueTs = Number(loan.dueTs||0);
+  const daysOverdue = now > dueTs ? Math.floor((now-dueTs)/86400000) : 0;
+  const lateFeePct = Number((settings && settings.lateFeePercentPerDay) || 0);
+  const waived = !!loan.lateFeeWaived;
+  const newLateFee = (!waived && daysOverdue>0) ? Math.round(daysOverdue * lateFeePct/100 * Number(loan.totalRepayment||0)) : 0;
+  const totalDue = Number(loan.totalRepayment||0) + newLateFee;
+  const paid = Number(loan.paidAmount||0);
+  const newRemaining = Math.max(0, totalDue - paid);
+  const updates = {};
+  if (newLateFee !== Number(loan.lateFee||0)) updates.lateFee = newLateFee;
+  if (newRemaining !== Number(loan.remainingAmount||0)) updates.remainingAmount = newRemaining;
+  if (Object.keys(updates).length) {
+    try { await update(ref(db, `loanRequests/${loan.key}`), updates); } catch(e) {}
+    Object.assign(loan, updates);
+  }
+  loan._isOverdue = daysOverdue > 0 && newRemaining > 0;
+  loan._daysOverdue = daysOverdue;
+  return loan;
+};
+
+window.adminLoans = async () => {
+  window._adminPage = 'loans';
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:10px">🏦 লোন রিকোয়েস্ট</h2>
+    <div class="filter-tabs">
+      <button class="ftab active" onclick="loadLoans('pending',this)">⏳ পেন্ডিং</button>
+      <button class="ftab" onclick="loadLoans('approved',this)">✅ সক্রিয়</button>
+      <button class="ftab" onclick="loadLoans('overdue',this)">⚠️ মেয়াদোত্তীর্ণ</button>
+      <button class="ftab" onclick="loadLoans('paid',this)">✔️ পরিশোধিত</button>
+      <button class="ftab" onclick="loadLoans('rejected',this)">❌ বাতিল</button>
+    </div>
+    <div id="loanListBox"><div class="loading-txt">লোড হচ্ছে...</div></div>
+  </div>`;
+  loadLoans('pending', document.querySelector('.ftab.active'));
+};
+
+window.loadLoans = async (statusFilter, btnEl) => {
+  document.querySelectorAll('.ftab').forEach(b=>b.classList.remove('active'));
+  if(btnEl) btnEl.classList.add('active');
+  const box = H('loanListBox');
+  box.innerHTML = '<div class="loading-txt">লোড হচ্ছে...</div>';
+  const [snap, usersSnap, settingsSnap] = await Promise.all([get(ref(db,'loanRequests')), get(ref(db,'users')), get(ref(db,'settings/loan'))]);
+  const settings = settingsSnap.exists() ? settingsSnap.val() : {};
+  let all = [];
+  if(snap.exists()) snap.forEach(c=>{ all.push({key:c.key, ...c.val()}); });
+
+  // Refresh late fee / remaining amount for every approved loan first, then filter by requested status
+  for (const l of all) { if (l.status === 'approved') await refreshLoanRecord(l, settings); }
+  all.forEach(l => { l._dispStatus = (l.status==='approved' && l._isOverdue) ? 'overdue' : (l.status==='repaid' ? 'paid' : l.status); });
+
+  const items = all.filter(l => l._dispStatus === statusFilter);
+  items.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const userMap = {};
+  if(usersSnap.exists()) usersSnap.forEach(c=>{ const u=c.val(); userMap[u.uid]=u; });
+  if(!items.length){ box.innerHTML=`<div class="empty-state">কোনো রিকোয়েস্ট নেই</div>`; return; }
+  const stColor={approved:'var(--green)',rejected:'var(--red)',pending:'var(--amber)',paid:'var(--cyan)',overdue:'var(--red)'};
+  const stIcon ={approved:'✅',rejected:'❌',pending:'⏳',paid:'✔️',overdue:'⚠️'};
+  const stText ={approved:'সক্রিয়',rejected:'বাতিল',pending:'পেন্ডিং',paid:'পরিশোধিত',overdue:'মেয়াদোত্তীর্ণ'};
+  box.innerHTML = items.map(l=>{
+    const u = userMap[l.uid]||{};
+    const ds = l._dispStatus;
+    const totalDue = Number(l.totalRepayment||0) + Number(l.lateFee||0);
+    const paidAmt = Number(l.paidAmount||0);
+    const remaining = l.remainingAmount != null ? Number(l.remainingAmount) : Math.max(0, totalDue - paidAmt);
+    const payments = [];
+    if (l.payments) Object.values(l.payments).forEach(p => payments.push(p));
+    payments.sort((a,b)=>(b.ts||0)-(a.ts||0));
+    return `<div class="req-card">
+      <div class="req-header">
+        <div>
+          <div style="font-weight:700;font-size:15px">৳${fmt(l.amount)}</div>
+          <div style="font-size:11px;color:var(--text2)">${u.name||'অজানা'} • ${u.email||l.uid.slice(0,8)}</div>
+        </div>
+        <span class="status-chip" style="color:${stColor[ds]};border-color:${stColor[ds]}40;background:${stColor[ds]}15">${stIcon[ds]} ${stText[ds]}</span>
+      </div>
+      <div class="req-meta">
+        <span>💰 চার্জ: ৳${fmt(l.serviceCharge)} (${l.serviceChargePercent||0}%)</span>
+        ${l.lateFee ? `<span style="color:var(--red)">⚠️ লেট ফি: ৳${fmt(l.lateFee)}</span>` : ''}
+        <span>📊 মোট: ৳${fmt(totalDue)}</span>
+        <span>💵 পরিশোধিত: ৳${fmt(paidAmt)}</span>
+        <span>📉 বাকি: ৳${fmt(remaining)}</span>
+        <span>📅 মেয়াদ: ${l.dueDate||'—'}</span>
+        ${l.autoApproved ? `<span>🤖 স্বয়ংক্রিয় অনুমোদিত</span>` : ''}
+        <span>🕐 ${new Date(l.ts||0).toLocaleString('bn-BD')}</span>
+      </div>
+      ${payments.length ? `<div style="margin-top:8px;font-size:11px;color:var(--text3)">
+        <div style="font-weight:600;color:var(--text2);margin-bottom:3px">💳 পরিশোধ ইতিহাস</div>
+        ${payments.map(p=>`<div>• ৳${fmt(p.amount)} — ${p.date||new Date(p.ts||0).toLocaleDateString('bn-BD')}</div>`).join('')}
+      </div>` : ''}
+      ${l.status==='pending'?`<div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn btn-green btn-sm" style="flex:1" onclick="approveLoan('${l.key}','${l.uid}',${l.amount})">✅ অনুমোদন</button>
+        <button class="btn btn-red btn-sm" style="flex:1" onclick="rejectLoan('${l.key}','${l.uid}',${l.amount})">❌ বাতিল</button>
+      </div>`:''}
+      ${(l.status==='approved')?`<div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn btn-primary btn-sm" style="flex:1" onclick="markLoanPaid('${l.key}','${l.uid}',${totalDue})">✔️ পরিশোধিত চিহ্নিত করুন</button>
+        ${ds==='overdue' && !l.lateFeeWaived ? `<button class="btn btn-sm" style="flex:1;background:var(--surface3);color:var(--text2);border:1px solid var(--border2)" onclick="waiveLateFee('${l.key}','${l.uid}')">🎁 লেট ফি মওকুফ</button>` : ''}
+      </div>`:''}
+    </div>`;
+  }).join('');
+};
+
+window.approveLoan = async (key, uid, amount) => {
+  if(!confirm(`৳${fmt(amount)} লোন অনুমোদন করবেন? টাকা ইউজারের আর্নিং ব্যালেন্সে যোগ হবে।`)) return;
+  try {
+    // ── SECURE APPROVAL: LOCK THE REQUEST FIRST ── same double-click / two-admin protection as approveDeposit.
+    const lockTx = await runTransaction(ref(db, `loanRequests/${key}/status`), (cur) => {
+      // See approveDeposit for why null must not be treated as "already processed".
+      if (cur !== null && cur !== 'pending') return; // genuinely already handled — abort, no write
+      return 'approved';
+    });
+    if (!lockTx.committed) { toast('এই রিকোয়েস্টটি ইতিমধ্যে প্রসেস হয়েছে','err'); loadLoans('pending', document.querySelector('.ftab.active')); return; }
+    await update(ref(db,`loanRequests/${key}`), {approvedAt:Date.now(), paidAmount:0, lateFee:0, lateFeeWaived:false});
+
+    const txRes = await runTransaction(ref(db, `users/${uid}/earningBalance`), (cur) => (Number(cur)||0) + amount);
+    const newBal = Number(txRes.snapshot.val()||0);
+    await push(ref(db,`balanceHistory/${uid}`), {type:'credit', amount, reason:'লোন অনুমোদিত', balanceAfter:newBal, date:'এইমাত্র', ts:Date.now()});
+    await push(ref(db,`notifications/${uid}`), {msg:`✅ আপনার ৳${fmt(amount)} লোন অনুমোদিত! নতুন আর্নিং ব্যালেন্স: ৳${fmt(newBal)}`, seen:false, date:'এইমাত্র', ts:Date.now()});
+    toast('লোন অনুমোদিত ✅','ok');
+    loadLoans('pending', document.querySelector('.ftab.active'));
+  } catch(e){ toast('সমস্যা হয়েছে','err'); }
+};
+
+window.rejectLoan = async (key, uid, amount) => {
+  if(!confirm(`৳${fmt(amount)} লোন বাতিল করবেন?`)) return;
+  try {
+    await update(ref(db,`loanRequests/${key}`), {status:'rejected', rejectedAt:Date.now()});
+    await push(ref(db,`notifications/${uid}`), {msg:`❌ আপনার ৳${fmt(amount)} লোন রিকোয়েস্ট বাতিল হয়েছে।`, seen:false, date:'এইমাত্র', ts:Date.now()});
+    toast('লোন বাতিল করা হয়েছে','ok');
+    loadLoans('pending', document.querySelector('.ftab.active'));
+  } catch(e){ toast('সমস্যা হয়েছে','err'); }
+};
+
+// Manual override for offline/cash repayments — marks the loan fully settled.
+window.markLoanPaid = async (key, uid, totalDue) => {
+  if(!confirm(`এই লোনটি (মোট ৳${fmt(totalDue)}) সম্পূর্ণ পরিশোধিত হিসেবে চিহ্নিত করবেন?`)) return;
+  try {
+    await update(ref(db,`loanRequests/${key}`), {status:'paid', paidAt:Date.now(), paidAmount:totalDue, remainingAmount:0});
+    await push(ref(db,`notifications/${uid}`), {msg:`✔️ আপনার ৳${fmt(totalDue)} লোন পরিশোধিত হিসেবে চিহ্নিত হয়েছে।`, seen:false, date:'এইমাত্র', ts:Date.now()});
+    toast('লোন পরিশোধিত হিসেবে আপডেট হয়েছে ✅','ok');
+    loadLoans(document.querySelector('.ftab.active').textContent.includes('মেয়াদ')?'overdue':'approved', document.querySelector('.ftab.active'));
+  } catch(e){ toast('সমস্যা হয়েছে','err'); }
+};
+
+// Stops further late-fee accrual on this loan; remaining amount drops back to
+// principal + service charge minus whatever's already been paid.
+window.waiveLateFee = async (key, uid) => {
+  if(!confirm('এই লোনের লেট ফি মওকুফ করবেন?')) return;
+  try {
+    const snap = await get(ref(db, `loanRequests/${key}`));
+    if (!snap.exists()) return;
+    const l = snap.val();
+    const newRemaining = Math.max(0, Number(l.totalRepayment||0) - Number(l.paidAmount||0));
+    await update(ref(db,`loanRequests/${key}`), {lateFeeWaived:true, lateFee:0, remainingAmount:newRemaining});
+    await push(ref(db,`notifications/${uid}`), {msg:`🎁 আপনার লোনের লেট ফি মওকুফ করা হয়েছে।`, seen:false, date:'এইমাত্র', ts:Date.now()});
+    toast('লেট ফি মওকুফ করা হয়েছে ✅','ok');
+    loadLoans('overdue', document.querySelector('.ftab.active'));
+  } catch(e){ toast('সমস্যা হয়েছে','err'); }
+};
+
+// ══ LOAN SETTINGS ══
+window.adminLoanSettings = async () => {
+  window._adminPage = 'loanSettings';
+  const snap = await get(ref(db,'settings/loan'));
+  const s = snap.exists() ? snap.val() : { serviceChargePercent:'', durationDays:'', lateFeePercentPerDay:'', minAccountAgeDays:'', autoApprovalEnabled:false, startingAmount:'', limitIncreasePerRepayment:'', maxLimit:'' };
+  const elig = s.eligibility || { depositEnabled:false, minDeposit:'', referralEnabled:false, minReferral:'', shareEnabled:false, minShare:'', withdrawEnabled:false, minWithdraw:'' };
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:16px">⚙️ লোন সেটিংস</h2>
+    <div class="card">
+      <div class="form-group"><label>📊 সার্ভিস চার্জ (%)</label><input id="loanChargePct" class="form-input" type="number" placeholder="যেমন: ১০" value="${s.serviceChargePercent||''}"></div>
+      <div class="form-group"><label>📅 পরিশোধের মেয়াদ (দিন)</label><input id="loanDuration" class="form-input" type="number" placeholder="যেমন: ৩০" value="${s.durationDays||''}"></div>
+      <div class="form-group"><label>⚠️ লেট ফি (দৈনিক %, মেয়াদোত্তীর্ণ হলে)</label><input id="loanLateFeePct" class="form-input" type="number" placeholder="যেমন: ১" value="${s.lateFeePercentPerDay||''}"></div>
+      <button class="btn btn-primary" id="loanSettingsSaveBtn" onclick="saveLoanSettings()">💾 সংরক্ষণ করুন</button>
+    </div>
+
+    <div class="sec-title">🤖 স্বয়ংক্রিয় অনুমোদন (Auto Approval)</div>
+    <div class="card">
+      <div class="form-group"><label>স্বয়ংক্রিয় অনুমোদন</label>
+        <select id="loanAutoApprove" class="form-input">
+          <option value="true" ${s.autoApprovalEnabled?'selected':''}>✅ চালু</option>
+          <option value="false" ${!s.autoApprovalEnabled?'selected':''}>❌ বন্ধ</option>
+        </select>
+      </div>
+      <div class="form-group"><label>👤 ন্যূনতম অ্যাকাউন্টের বয়স (দিন)</label><input id="loanMinAge" class="form-input" type="number" placeholder="যেমন: ৭" value="${s.minAccountAgeDays||''}"></div>
+      <div class="info-banner" style="margin-bottom:0">📌 যোগ্যতা: অ্যাকাউন্টের বয়স ন্যূনতম মেয়াদের বেশি, অ্যাকাউন্ট সক্রিয়, এবং কোনো মেয়াদোত্তীর্ণ লোন না থাকা।</div>
+      <button class="btn btn-primary" style="margin-top:14px" id="loanAutoSaveBtn" onclick="saveLoanAutoSettings()">💾 সংরক্ষণ করুন</button>
+    </div>
+
+    <div class="sec-title">📋 লোন যোগ্যতা শর্তাবলী (Eligibility Requirements)</div>
+    <div class="card">
+      <div class="info-banner" style="margin-bottom:14px">📌 প্রতিটি শর্ত আলাদাভাবে চালু/বন্ধ করা যায়। চালু থাকা শর্তগুলো User-এর Loan পেজে Progress Checklist হিসেবে দেখাবে।</div>
+
+      <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;background:var(--surface3);padding:10px 12px;border-radius:10px;margin-bottom:8px">
+        <label style="margin:0">💰 ন্যূনতম ডিপোজিট শর্ত</label>
+        <select id="eligDepositEnabled" class="form-input" style="width:auto;min-width:100px">
+          <option value="true" ${elig.depositEnabled?'selected':''}>✅ চালু</option>
+          <option value="false" ${!elig.depositEnabled?'selected':''}>❌ বন্ধ</option>
+        </select>
+      </div>
+      <div class="form-group"><label>ন্যূনতম ডিপোজিট পরিমাণ (৳)</label><input id="eligMinDeposit" class="form-input" type="number" placeholder="যেমন: ৫০০০" value="${elig.minDeposit||''}"></div>
+
+      <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;background:var(--surface3);padding:10px 12px;border-radius:10px;margin-bottom:8px">
+        <label style="margin:0">👥 ন্যূনতম Real Referral শর্ত</label>
+        <select id="eligReferralEnabled" class="form-input" style="width:auto;min-width:100px">
+          <option value="true" ${elig.referralEnabled?'selected':''}>✅ চালু</option>
+          <option value="false" ${!elig.referralEnabled?'selected':''}>❌ বন্ধ</option>
+        </select>
+      </div>
+      <div class="form-group"><label>ন্যূনতম Real Referral সংখ্যা</label><input id="eligMinReferral" class="form-input" type="number" placeholder="যেমন: ১" value="${elig.minReferral||''}"></div>
+
+      <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;background:var(--surface3);padding:10px 12px;border-radius:10px;margin-bottom:8px">
+        <label style="margin:0">🛒 ন্যূনতম Share Buy শর্ত</label>
+        <select id="eligShareEnabled" class="form-input" style="width:auto;min-width:100px">
+          <option value="true" ${elig.shareEnabled?'selected':''}>✅ চালু</option>
+          <option value="false" ${!elig.shareEnabled?'selected':''}>❌ বন্ধ</option>
+        </select>
+      </div>
+      <div class="form-group"><label>ন্যূনতম Share সংখ্যা</label><input id="eligMinShare" class="form-input" type="number" placeholder="যেমন: ১" value="${elig.minShare||''}"></div>
+
+      <div class="form-group" style="display:flex;justify-content:space-between;align-items:center;background:var(--surface3);padding:10px 12px;border-radius:10px;margin-bottom:8px">
+        <label style="margin:0">⬆️ ন্যূনতম Withdraw সংখ্যা শর্ত</label>
+        <select id="eligWithdrawEnabled" class="form-input" style="width:auto;min-width:100px">
+          <option value="true" ${elig.withdrawEnabled?'selected':''}>✅ চালু</option>
+          <option value="false" ${!elig.withdrawEnabled?'selected':''}>❌ বন্ধ</option>
+        </select>
+      </div>
+      <div class="form-group"><label>ন্যূনতম Withdraw সংখ্যা</label><input id="eligMinWithdraw" class="form-input" type="number" placeholder="যেমন: ১" value="${elig.minWithdraw||''}"></div>
+
+      <button class="btn btn-primary" id="loanEligSaveBtn" onclick="saveLoanEligibilitySettings()">💾 সংরক্ষণ করুন</button>
+    </div>
+
+    <div class="sec-title">💰 লোন লিমিট সেটিংস (Loan Limit System)</div>
+    <div class="card">
+      <div class="info-banner" style="margin-bottom:14px">📌 Starting Amount দিলে প্রতিটি User তার প্রথম লোন এই পরিমাণ থেকে শুরু করবে। প্রতিবার লোন সম্পূর্ণ পরিশোধ করলে Limit স্বয়ংক্রিয়ভাবে বেড়ে যাবে (Maximum পর্যন্ত)। Starting Amount সেট না করা পর্যন্ত User-দের জন্য লোন অপশন লক থাকবে।</div>
+      <div class="form-group"><label>🏁 Starting Loan Amount (৳)</label><input id="loanStartAmt" class="form-input" type="number" placeholder="যেমন: ৫০০" value="${s.startingAmount||''}"></div>
+      <div class="form-group"><label>📈 প্রতি সম্পূর্ণ পরিশোধে Limit বৃদ্ধি (৳)</label><input id="loanLimitIncrease" class="form-input" type="number" placeholder="যেমন: ৫০০" value="${s.limitIncreasePerRepayment||''}"></div>
+      <div class="form-group"><label>🔝 সর্বোচ্চ (Maximum) লোন লিমিট (৳)</label><input id="loanMaxLimit" class="form-input" type="number" placeholder="যেমন: ১০০০০ (খালি রাখলে কোনো সীমা নেই)" value="${s.maxLimit||''}"></div>
+      <button class="btn btn-primary" id="loanUpgradeSaveBtn" onclick="saveLoanUpgradeSettings()">💾 সংরক্ষণ করুন</button>
+    </div>
+  </div>`;
+};
+
+window.saveLoanSettings = async () => {
+  const serviceChargePercent = Number(H('loanChargePct').value||0);
+  const durationDays = Number(H('loanDuration').value||0);
+  const lateFeePercentPerDay = Number(H('loanLateFeePct').value||0);
+  if(durationDays<=0){ toast('সঠিক মেয়াদ দিন','err'); return; }
+  const btn = H('loanSettingsSaveBtn'); btn.disabled=true; btn.textContent='সংরক্ষণ হচ্ছে...';
+  try { await update(ref(db,'settings/loan'),{serviceChargePercent,durationDays,lateFeePercentPerDay}); toast('লোন সেটিংস আপডেট ✅','ok'); }
+  catch(e){ toast('সমস্যা হয়েছে','err'); }
+  btn.disabled=false; btn.textContent='💾 সংরক্ষণ করুন';
+};
+
+window.saveLoanAutoSettings = async () => {
+  const autoApprovalEnabled = H('loanAutoApprove').value === 'true';
+  const minAccountAgeDays = Number(H('loanMinAge').value||0);
+  const btn = H('loanAutoSaveBtn'); btn.disabled=true; btn.textContent='সংরক্ষণ হচ্ছে...';
+  try { await update(ref(db,'settings/loan'),{autoApprovalEnabled,minAccountAgeDays}); toast('অটো-অ্যাপ্রুভাল সেটিংস আপডেট ✅','ok'); }
+  catch(e){ toast('সমস্যা হয়েছে','err'); }
+  btn.disabled=false; btn.textContent='💾 সংরক্ষণ করুন';
+};
+
+window.saveLoanUpgradeSettings = async () => {
+  const startingAmount = Number(H('loanStartAmt').value||0);
+  const limitIncreasePerRepayment = Number(H('loanLimitIncrease').value||0);
+  const maxLimit = Number(H('loanMaxLimit').value||0);
+  if (startingAmount > 0 && maxLimit > 0 && startingAmount > maxLimit) { toast('Starting Amount, Maximum Limit-এর চেয়ে বেশি হতে পারবে না', 'err'); return; }
+  const btn = H('loanUpgradeSaveBtn'); btn.disabled=true; btn.textContent='সংরক্ষণ হচ্ছে...';
+  try { await update(ref(db,'settings/loan'),{startingAmount,limitIncreasePerRepayment,maxLimit}); toast('লোন লিমিট আপগ্রেড সেটিংস আপডেট ✅','ok'); }
+  catch(e){ toast('সমস্যা হয়েছে','err'); }
+  btn.disabled=false; btn.textContent='💾 সংরক্ষণ করুন';
+};
+
+window.saveLoanEligibilitySettings = async () => {
+  const eligibility = {
+    depositEnabled: H('eligDepositEnabled').value === 'true',
+    minDeposit: Number(H('eligMinDeposit').value||0),
+    referralEnabled: H('eligReferralEnabled').value === 'true',
+    minReferral: Number(H('eligMinReferral').value||0),
+    shareEnabled: H('eligShareEnabled').value === 'true',
+    minShare: Number(H('eligMinShare').value||0),
+    withdrawEnabled: H('eligWithdrawEnabled').value === 'true',
+    minWithdraw: Number(H('eligMinWithdraw').value||0),
+  };
+  const btn = H('loanEligSaveBtn'); btn.disabled=true; btn.textContent='সংরক্ষণ হচ্ছে...';
+  try { await update(ref(db,'settings/loan'),{eligibility}); toast('যোগ্যতা শর্তাবলী আপডেট ✅','ok'); }
+  catch(e){ toast('সমস্যা হয়েছে','err'); }
+  btn.disabled=false; btn.textContent='💾 সংরক্ষণ করুন';
+};
+
+// ══ NOTIFY ══
+window.adminNotify = async () => {
+  const snap = await get(ref(db,'users'));
+  const users = [];
+  if(snap.exists()) snap.forEach(c=>{ const u=c.val(); if(u.role!=='admin') users.push(u); });
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:16px">🔔 নোটিফিকেশন পাঠান</h2>
+    <div class="card">
+      <div class="form-group"><label>প্রাপক</label>
+        <select id="notifyTarget" class="form-input">
+          <option value="all">📢 সকল ব্যবহারকারী (${users.length}জন)</option>
+          ${users.map(u=>`<option value="${u.uid}">${u.name} (${u.email})</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label>বার্তা</label><textarea id="notifyMsg" class="form-input" rows="4" placeholder="বার্তা লিখুন..."></textarea></div>
+      <button class="btn btn-primary" id="notifyBtn" onclick="sendAdminNotify()">📤 পাঠান</button>
+    </div>
+  </div>`;
+};
+
+window.sendAdminNotify = async () => {
+  const target = H('notifyTarget').value;
+  const msg    = H('notifyMsg').value.trim();
+  if (!msg){ toast('বার্তা লিখুন','err'); return; }
+  const btn = H('notifyBtn'); btn.disabled=true; btn.textContent='পাঠানো হচ্ছে...';
+  try {
+    if (target==='all') {
+      const snap = await get(ref(db,'users'));
+      const pushes = [];
+      if(snap.exists()) snap.forEach(c=>{
+        const u=c.val();
+        if(u.role!=='admin') pushes.push(push(ref(db,`notifications/${u.uid}`),{msg:`📢 ${msg}`,seen:false,date:'এইমাত্র',ts:Date.now()}));
+      });
+      await Promise.all(pushes);
+    } else {
+      await push(ref(db,`notifications/${target}`),{msg:`📢 ${msg}`,seen:false,date:'এইমাত্র',ts:Date.now()});
+    }
+    toast('নোটিফিকেশন পাঠানো হয়েছে ✅','ok');
+    adminBack();
+  } catch(e){ toast('সমস্যা হয়েছে','err'); btn.disabled=false; btn.textContent='📤 পাঠান'; }
+};
+
+// ══ NOTICE ══
+window.adminNoticeSettings = async () => {
+  const snap = await get(ref(db,'settings/notice'));
+  const notice = snap.exists() ? snap.val() : '';
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:16px">📢 নোটিস মার্কি</h2>
+    <div class="card">
+      <div class="form-group"><label>নোটিস টেক্সট</label>
+        <textarea id="noticeText" class="form-input" rows="4" placeholder="হোমপেজে মার্কি হিসেবে দেখাবে...">${notice}</textarea>
+      </div>
+      <button class="btn btn-primary" id="noticeSaveBtn" onclick="saveNotice()">💾 সংরক্ষণ করুন</button>
+    </div>
+  </div>`;
+};
+
+window.saveNotice = async () => {
+  const text = H('noticeText').value.trim();
+  if(!text){ toast('নোটিস লিখুন','err'); return; }
+  const btn = H('noticeSaveBtn'); btn.disabled=true; btn.textContent='সংরক্ষণ হচ্ছে...';
+  try { await set(ref(db,'settings/notice'), text); toast('নোটিস আপডেট হয়েছে ✅','ok'); }
+  catch(e){ toast('সমস্যা হয়েছে','err'); }
+  btn.disabled=false; btn.textContent='💾 সংরক্ষণ করুন';
+};
+
+// ══ PAYMENT ══
+window.adminPaymentSettings = async () => {
+  const snap = await get(ref(db,'settings/payment'));
+  const p = snap.exists() ? snap.val() : {bkash:'', nagad:''};
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:16px">💳 পেমেন্ট নম্বর</h2>
+    <div class="card">
+      <div class="form-group"><label>🟣 bKash নম্বর</label><input id="bkashNum" class="form-input" type="tel" placeholder="01XXXXXXXXXX" value="${p.bkash||''}"></div>
+      <div class="form-group"><label>🔴 Nagad নম্বর</label><input id="nagadNum" class="form-input" type="tel" placeholder="01XXXXXXXXXX" value="${p.nagad||''}"></div>
+      <button class="btn btn-primary" id="paySaveBtn" onclick="savePaymentNumbers()">💾 সংরক্ষণ করুন</button>
+    </div>
+  </div>`;
+};
+
+window.savePaymentNumbers = async () => {
+  const bkash = H('bkashNum').value.trim();
+  const nagad  = H('nagadNum').value.trim();
+  if(!bkash && !nagad){ toast('অন্তত একটি নম্বর দিন','err'); return; }
+  const btn = H('paySaveBtn'); btn.disabled=true; btn.textContent='সংরক্ষণ হচ্ছে...';
+  try { await set(ref(db,'settings/payment'),{bkash,nagad}); toast('পেমেন্ট নম্বর আপডেট ✅','ok'); }
+  catch(e){ toast('সমস্যা হয়েছে','err'); }
+  btn.disabled=false; btn.textContent='💾 সংরক্ষণ করুন';
+};
+
+// ══ BUY SHARE ══
+const IMGBB_API_KEY = 'daf578a6cc48a80752818f90d07ef78c';
+
+window.uploadToImgbb = async (file) => {
+  const formData = new FormData();
+  formData.append('image', file);
+  const res = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, { method:'POST', body:formData });
+  const data = await res.json();
+  if (!data.success) throw new Error('imgbb upload failed');
+  return data.data.url;
+};
+
+window.adminBuyShareSettings = async () => {
+  window._adminPage = 'buyshare';
+  const snap = await get(ref(db,'buyShareCards'));
+  const cards = [];
+  if (snap.exists()) snap.forEach(c => { cards.push({ key:c.key, ...c.val() }); });
+  cards.sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <div class="dash-header">
+      <h2 style="margin-bottom:0">🛒 Buy Share</h2>
+      <button class="btn btn-primary btn-sm" onclick="buyShareCardForm()">➕ নতুন কার্ড</button>
+    </div>
+    <div id="bsCardListBox" style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">${cards.length ? cards.map(c=>buyShareCardItemHtml(c)).join('') : '<div class="empty-state" style="grid-column:1/-1">কোনো Buy Share কার্ড নেই। "নতুন কার্ড" চেপে একটি যোগ করুন।</div>'}</div>
+  </div>`;
+};
+
+function buyShareCardItemHtml(c) {
+  const now = Date.now();
+  const active = c.endTime > now;
+  const remain = active ? c.endTime - now : 0;
+  const rd = Math.floor(remain/86400000);
+  const rh = Math.floor((remain%86400000)/3600000);
+  const rm = Math.floor((remain%3600000)/60000);
+  return `<div class="req-card" style="padding:10px;position:relative">
+    ${c.isTop ? `<div style="position:absolute;top:8px;left:8px;background:#f59e0b;color:#1a1a1a;font-size:10px;font-weight:800;padding:3px 8px;border-radius:10px;z-index:1">⭐ TOP</div>` : ''}
+    <img src="${c.imageUrl||''}" style="width:100%;aspect-ratio:1/1;border-radius:10px;object-fit:cover;background:var(--surface3);margin-bottom:8px">
+    <div style="font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.title||''}</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:2px">৳${fmt(c.price)} • ${c.durationDays} দিন</div>
+    ${c.description ? `<div style="font-size:11px;color:var(--text3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.description}</div>` : ''}
+    ${c.profitAmount ? `<div style="font-size:11px;color:#f59e0b;margin-top:2px;font-weight:700">🎁 লাভ ৳${fmt(c.profitAmount)}</div>` : ''}
+    <div style="font-size:11px;margin-top:4px" class="${active?'green':'red'}">${active?`✅ বাকি ${rd}দ ${rh}ঘ ${rm}মি`:'⛔ মেয়াদ শেষ'}</div>
+    <button class="btn btn-sm" style="width:100%;margin-top:8px;${c.isTop ? 'background:var(--surface3);color:var(--text2)' : 'background:#f59e0b;color:#1a1a1a'}" onclick="toggleTopShare('${c.key}', ${c.isTop ? 'false' : 'true'})">${c.isTop ? '❌ টপ থেকে সরান' : '⭐ সেন্ড টু টপ'}</button>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button class="btn btn-accent2 btn-sm" style="flex:1" onclick="buyShareCardForm('${c.key}')">✏️ এডিট</button>
+      <button class="btn btn-red btn-sm" style="flex:1" onclick="deleteBuyShareCard('${c.key}')">🗑️</button>
+    </div>
+  </div>`;
+}
+
+// Toggling "Top Share" flags which buy-share cards appear in the Top Share
+// List on the user home page, directly beneath the service icons.
+window.toggleTopShare = async (cardId, makeTop) => {
+  try {
+    await update(ref(db,`buyShareCards/${cardId}`), { isTop: makeTop });
+    toast(makeTop ? 'টপ শেয়ার লিস্টে যোগ হয়েছে ✅' : 'টপ শেয়ার থেকে সরানো হয়েছে ✅', 'ok');
+    adminBuyShareSettings();
+  } catch (e) { toast('সমস্যা হয়েছে', 'err'); }
+};
+
+window.deleteBuyShareCard = async (cardId) => {
+  if (!confirm('এই কার্ডটি মুছতে চান?')) return;
+  try { await remove(ref(db,`buyShareCards/${cardId}`)); toast('কার্ড মুছে ফেলা হয়েছে ✅','ok'); adminBuyShareSettings(); }
+  catch (e) { toast('সমস্যা হয়েছে','err'); }
+};
+
+window.buyShareCardForm = async (cardId) => {
+  window._adminPage = 'buyshareform';
+  let c = null;
+  if (cardId) {
+    const snap = await get(ref(db,`buyShareCards/${cardId}`));
+    if (snap.exists()) c = snap.val();
+  }
+  window._bsUploadedUrl = c && c.imageUrl ? c.imageUrl : '';
+  const now = Date.now();
+  const remain = c && c.endTime > now ? c.endTime - now : 0;
+  const rd = Math.floor(remain/86400000);
+  const rh = Math.floor((remain%86400000)/3600000);
+  const rm = Math.floor((remain%3600000)/60000);
+  const rs = Math.floor((remain%60000)/1000);
+
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBuyShareSettings()">← ফিরে যান</div>
+    <h2 style="margin-bottom:16px">🛒 ${cardId ? 'কার্ড এডিট করুন' : 'নতুন কার্ড যোগ করুন'}</h2>
+    <div class="card">
+      <div class="form-group">
+        <label>থাম্বনেইল ছবি</label>
+        <input type="file" id="bsFileInput" accept="image/*" class="form-input" style="padding:8px">
+        <div id="bsPreviewWrap" style="margin-top:10px;${window._bsUploadedUrl?'':'display:none'}">
+          <img id="bsPreviewImg" src="${window._bsUploadedUrl}" style="width:100%;max-width:220px;border-radius:12px;display:block">
+        </div>
+      </div>
+      <div class="form-group"><label>টাইটেল</label><input id="bsTitle" class="form-input" placeholder="যেমন: শেয়ার কিনুন" value="${c && c.title ? c.title : ''}"></div>
+      <div class="form-group"><label>বিবরণ (ঐচ্ছিক)</label><textarea id="bsDescription" class="form-input" rows="3" placeholder="এই শেয়ার সম্পর্কে বিস্তারিত লিখুন (না দিলেও চলবে)">${c && c.description ? c.description : ''}</textarea></div>
+      <div class="form-group"><label>দাম (৳)</label><input id="bsPrice" type="number" min="0" class="form-input" placeholder="যেমন: 500" value="${c && c.price ? c.price : ''}"></div>
+      <div class="form-group"><label>শেয়ারের মেয়াদ (দিন)</label>
+        <input id="bsDurationDays" type="number" min="1" class="form-input" placeholder="যেমন: 30" value="${c && c.durationDays ? c.durationDays : ''}">
+        <p style="font-size:11px;color:var(--text3);margin-top:6px">User যখনই কিনবে, তার নিজের "My Share"-এ এই কয়দিনের কাউন্টডাউন কেনার মুহূর্ত থেকে শুরু হবে।</p>
+      </div>
+      <div class="form-group"><label>লাভ (৳)</label>
+        <input id="bsProfit" type="number" min="0" class="form-input" placeholder="যেমন: 150" value="${c && c.profitAmount ? c.profitAmount : ''}">
+        <p style="font-size:11px;color:var(--text3);margin-top:6px">এই শেয়ারটি কিনলে উপরে সেট করা মেয়াদ শেষে ইউজার এই পরিমাণ টাকা লাভ হিসেবে পাবে। খালি রাখলে লাভ দেখানো হবে না।</p>
+      </div>
+      <div class="form-group">
+        <label>অফার প্রদর্শনের কাউন্টডাউন (এখন থেকে) — এই সময় পর্যন্ত অফার হোমপেজে দেখাবে</label>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+          <input id="bsDays" type="number" min="0" class="form-input" placeholder="দিন" value="${rd}">
+          <input id="bsHours" type="number" min="0" max="23" class="form-input" placeholder="ঘণ্টা" value="${rh}">
+          <input id="bsMins" type="number" min="0" max="59" class="form-input" placeholder="মিনিট" value="${rm}">
+          <input id="bsSecs" type="number" min="0" max="59" class="form-input" placeholder="সেকেন্ড" value="${rs}">
+        </div>
+      </div>
+      <button class="btn btn-primary" id="bsSaveBtn" onclick="saveBuyShareCard('${cardId||''}')">💾 সংরক্ষণ করুন</button>
+    </div>
+  </div>`;
+
+  H('bsFileInput').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    H('bsPreviewWrap').style.display = 'block';
+    H('bsPreviewImg').src = URL.createObjectURL(file);
+    try {
+      toast('ছবি আপলোড হচ্ছে...', 'info');
+      const url = await uploadToImgbb(file);
+      window._bsUploadedUrl = url;
+      toast('ছবি আপলোড সম্পন্ন ✅', 'ok');
+    } catch (err) {
+      toast('ছবি আপলোড ব্যর্থ হয়েছে', 'err');
+    }
+  });
+};
+
+window.saveBuyShareCard = async (cardId) => {
+  const title = H('bsTitle').value.trim();
+  const description = H('bsDescription').value.trim();
+  const price = parseFloat(H('bsPrice').value) || 0;
+  const durationDays = parseInt(H('bsDurationDays').value) || 0;
+  const profitAmount = parseFloat(H('bsProfit').value) || 0;
+  const days  = parseInt(H('bsDays').value)  || 0;
+  const hours = parseInt(H('bsHours').value) || 0;
+  const mins  = parseInt(H('bsMins').value)  || 0;
+  const secs  = parseInt(H('bsSecs').value)  || 0;
+  const imageUrl = window._bsUploadedUrl || '';
+  if (!title)    { toast('টাইটেল লিখুন','err'); return; }
+  if (!imageUrl) { toast('একটি ছবি আপলোড করুন','err'); return; }
+  if (price <= 0) { toast('দাম সেট করুন','err'); return; }
+  if (durationDays <= 0) { toast('শেয়ারের মেয়াদ (দিন) সেট করুন','err'); return; }
+  const totalMs = (days*86400 + hours*3600 + mins*60 + secs) * 1000;
+  if (totalMs <= 0) { toast('অফার প্রদর্শনের কাউন্টডাউন সেট করুন','err'); return; }
+  const endTime = Date.now() + totalMs;
+  const btn = H('bsSaveBtn'); btn.disabled = true; btn.textContent = 'সংরক্ষণ হচ্ছে...';
+  try {
+    if (cardId) {
+      await update(ref(db,`buyShareCards/${cardId}`), { imageUrl, title, description, price, durationDays, profitAmount, endTime });
+    } else {
+      await push(ref(db,'buyShareCards'), { imageUrl, title, description, price, durationDays, profitAmount, endTime, createdAt: Date.now() });
+    }
+    toast('Buy Share কার্ড সংরক্ষিত হয়েছে ✅','ok');
+    adminBuyShareSettings();
+  } catch (e) { toast('সমস্যা হয়েছে','err'); }
+  btn.disabled = false; btn.textContent = '💾 সংরক্ষণ করুন';
+};
+
+// ══ SITE SETTINGS ══
+window.adminSiteSettings = async () => {
+  const snap = await get(ref(db,'settings/site'));
+  const s = snap.exists() ? snap.val() : {startDate:'2024-01-01'};
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:16px">🕐 সাইট সেটিংস</h2>
+    <div class="card">
+      <div class="form-group"><label>সাইট শুরুর তারিখ</label><input id="siteStartDate" class="form-input" type="date" value="${s.startDate||'2024-01-01'}"></div>
+      <button class="btn btn-primary" id="siteSaveBtn" onclick="saveSiteSettings()">💾 সংরক্ষণ করুন</button>
+    </div>
+  </div>`;
+};
+
+window.saveSiteSettings = async () => {
+  const startDate = H('siteStartDate').value;
+  if(!startDate){ toast('তারিখ দিন','err'); return; }
+  const btn = H('siteSaveBtn'); btn.disabled=true; btn.textContent='সংরক্ষণ হচ্ছে...';
+  try { await set(ref(db,'settings/site'),{startDate}); toast('সাইট সেটিংস আপডেট ✅','ok'); }
+  catch(e){ toast('সমস্যা হয়েছে','err'); }
+  btn.disabled=false; btn.textContent='💾 সংরক্ষণ করুন';
+};
+
+// ══ POPUP SETTINGS ══
+window.adminPopupSettings = async () => {
+  const p = window._welcomePopup;
+  H('mainContent').innerHTML = `<div class="page">
+    <div class="back-btn" onclick="adminBack()">← ফিরে যান</div>
+    <h2 style="margin-bottom:16px">👋 ওয়েলকাম পপআপ</h2>
+    <div class="card">
+      <div class="form-group"><label>স্ট্যাটাস</label>
+        <select id="ppEnabled" class="form-input">
+          <option value="true" ${p.enabled?'selected':''}>✅ চালু</option>
+          <option value="false" ${!p.enabled?'selected':''}>❌ বন্ধ</option>
+        </select>
+      </div>
+      <div class="form-group"><label>আইকন</label><input id="ppIcon" class="form-input" value="${p.icon}"></div>
+      <div class="form-group"><label>শিরোনাম</label><input id="ppTitle" class="form-input" value="${p.title}"></div>
+      <div class="form-group"><label>বার্তা</label><textarea id="ppMsg" class="form-input" rows="3">${p.message}</textarea></div>
+      <div class="form-group"><label>বাটনের লেখা</label><input id="ppBtn" class="form-input" value="${p.btn}"></div>
+      <button class="btn btn-primary" id="ppSaveBtn" onclick="savePopup()">💾 সংরক্ষণ</button>
+    </div>
+  </div>`;
+};
+
+window.savePopup = async () => {
+  const data = {
+    enabled: H('ppEnabled').value==='true',
+    icon: H('ppIcon').value||'🎉',
+    title: H('ppTitle').value,
+    message: H('ppMsg').value,
+    btn: H('ppBtn').value||'বুঝেছি'
+  };
+  const btn = H('ppSaveBtn'); btn.disabled=true; btn.textContent='সংরক্ষণ হচ্ছে...';
+  try {
+    await set(ref(db,'settings/welcomePopup'), data);
+    window._welcomePopup = data;
+    toast('পপআপ সেভ হয়েছে ✅','ok');
+    adminPopupSettings();
+  } catch(e){ toast('সমস্যা হয়েছে','err'); btn.disabled=false; btn.textContent='💾 সংরক্ষণ'; }
+};
+</script>
+
+<style>
+:root{
+  --bg:#06020f;--surface:#110829;--surface2:#1a1040;--surface3:#241858;
+  --border:rgba(160,120,255,0.14);--border2:rgba(160,120,255,0.28);
+  --accent:#7c3aed;--accent2:#d946ef;--green:#0fe6a8;--red:#ff4d6d;
+  --amber:#ffb020;--cyan:#22d3ee;--text:#f0eaff;--text2:#a89dce;--text3:#5e5190;
+  --r:14px;--r-sm:10px;--r-lg:22px;
+  --g1:linear-gradient(135deg,#7c3aed,#d946ef);
+  --g2:linear-gradient(135deg,#22d3ee,#7c3aed);
+  --g3:linear-gradient(135deg,#0fe6a8,#22d3ee);
+  --shadow:0 12px 48px rgba(124,58,237,0.3);
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:'Inter',sans-serif;color:var(--text);min-height:100vh;overflow-x:hidden;
+  background:radial-gradient(circle at 15% 10%,rgba(217,70,239,0.22) 0%,transparent 40%),
+  radial-gradient(circle at 85% 15%,rgba(34,211,238,0.18) 0%,transparent 42%),
+  radial-gradient(circle at 80% 85%,rgba(124,58,237,0.28) 0%,transparent 45%),
+  linear-gradient(160deg,#06020f 0%,#110829 50%,#06020f 100%);
+  background-attachment:fixed;-webkit-font-smoothing:antialiased;}
+h1,h2,h3,h4{font-family:'Space Grotesk',sans-serif;}
+.hidden{display:none!important;}
+#loading{position:fixed;inset:0;background:#06020f;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;}
+.spin{width:48px;height:48px;border:3px solid var(--border2);border-top-color:var(--accent2);border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;}
+.auth-box{width:100%;max-width:420px;background:linear-gradient(160deg,rgba(26,16,64,0.95),rgba(17,8,41,0.95));border:1px solid var(--border2);border-radius:var(--r-lg);padding:32px 24px;box-shadow:var(--shadow);backdrop-filter:blur(12px);}
+.logo{font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:700;margin-bottom:4px;}
+.logo span{background:var(--g1);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+.auth-sub{color:var(--text2);font-size:13px;margin-bottom:22px;}
+.field{margin-bottom:12px;}
+.field label{display:block;font-size:11px;font-weight:600;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px;}
+.field input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);padding:11px 14px;color:var(--text);font-size:14px;font-family:'Inter',sans-serif;-webkit-appearance:none;}
+.field input:focus{outline:none;border-color:var(--accent2);}
+.field input::placeholder{color:var(--text3);}
+.setup-note{font-size:11px;color:var(--text3);text-align:center;margin-top:14px;line-height:1.7;}
+.topbar{position:sticky;top:0;z-index:300;height:56px;background:linear-gradient(120deg,rgba(17,8,41,0.95),rgba(26,16,64,0.95));backdrop-filter:blur(22px);border-bottom:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between;padding:0 16px;}
+.topbar-logo{font-family:'Space Grotesk',sans-serif;font-size:17px;font-weight:700;}
+.topbar-logo span{background:var(--g1);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+.btn{width:100%;padding:12px;border-radius:var(--r-sm);border:none;font-size:14px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;transition:all .2s;-webkit-appearance:none;}
+.btn-primary{background:var(--g1);color:#fff;box-shadow:0 6px 22px rgba(124,58,237,0.4);}
+.btn-green{background:var(--g3);color:#03201a;}
+.btn-red{background:linear-gradient(135deg,#ff4d6d,#ff7eb3);color:#fff;}
+.btn-surface{background:var(--surface2);color:var(--text2);border:1px solid var(--border2);}
+.btn-accent2{background:var(--g2);color:#fff;}
+.btn:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.08);}
+.btn:active{transform:scale(0.97);}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none;}
+.btn-sm{padding:8px 14px;font-size:12px;width:auto;}
+.btn-logout{padding:8px 14px;border-radius:var(--r-sm);border:1px solid var(--border2);background:var(--surface2);color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;}
+.page{max-width:600px;margin:0 auto;padding:18px 14px 60px;}
+.dash-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;}
+.card{background:linear-gradient(150deg,rgba(26,16,64,0.88),rgba(17,8,41,0.88));border:1px solid var(--border);border-radius:var(--r);padding:16px;margin-bottom:14px;backdrop-filter:blur(14px);}
+.sec-title{font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;margin-top:4px;}
+.pill{display:inline-flex;align-items:center;gap:3px;padding:3px 9px;border-radius:50px;font-size:10px;font-weight:700;}
+.stat-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;}
+.stat-box{background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);padding:14px;position:relative;}
+.stat-box.click{cursor:pointer;transition:border-color .2s;}
+.stat-box.click:hover{border-color:var(--accent2);}
+.stat-lbl{font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px;}
+.stat-val{font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;display:flex;align-items:center;gap:6px;}
+.stat-val.green{color:var(--green);}
+.stat-val.amber{color:var(--amber);}
+.stat-val.red{color:var(--red);}
+.bdot{width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;animation:pulse 1.4s infinite;}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(1.3)}}
+.admin-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;}
+.admin-card{background:linear-gradient(150deg,rgba(26,16,64,0.9),rgba(17,8,41,0.9));border:1px solid var(--border);border-radius:var(--r);padding:16px;cursor:pointer;transition:all .22s;text-align:center;}
+.admin-card:hover{border-color:var(--accent2);transform:translateY(-2px);}
+.admin-card:active{transform:scale(0.96);}
+.admin-card .ac-icon{font-size:24px;margin-bottom:7px;}
+.admin-card h4{font-size:13px;font-weight:600;margin-bottom:3px;}
+.admin-card p{font-size:11px;color:var(--text3);}
+.admin-card p .amber{color:var(--amber);}
+.admin-card p .red{color:var(--red);}
+.admin-card p .green{color:var(--green);}
+.filter-tabs{display:flex;gap:5px;margin-bottom:14px;background:var(--surface2);border-radius:var(--r-sm);padding:4px;}
+.ftab{flex:1;padding:8px 4px;border-radius:8px;border:none;background:none;color:var(--text2);font-size:11px;font-weight:500;cursor:pointer;transition:all .2s;font-family:'Inter',sans-serif;}
+.ftab.active{background:var(--g1);color:#fff;box-shadow:0 4px 14px rgba(124,58,237,0.4);}
+.req-card{background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:15px;margin-bottom:10px;}
+.req-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;gap:10px;}
+.req-meta{display:flex;flex-wrap:wrap;gap:6px;font-size:11px;color:var(--text3);}
+.req-meta span{background:var(--surface3);padding:3px 8px;border-radius:20px;}
+.status-chip{font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;border:1px solid;flex-shrink:0;}
+.task-badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;border:1px solid;flex-shrink:0;}
+.task-badge.pending{color:var(--amber);border-color:rgba(255,176,32,0.3);background:rgba(255,176,32,0.12);}
+.task-badge.approved{color:var(--green);border-color:rgba(15,230,168,0.3);background:rgba(15,230,168,0.12);}
+.task-badge.rejected{color:var(--red);border-color:rgba(255,77,109,0.3);background:rgba(255,77,109,0.12);}
+.modal-bg{position:fixed;inset:0;background:rgba(4,1,14,0.82);z-index:600;display:flex;align-items:flex-end;justify-content:center;backdrop-filter:blur(8px);}
+.modal{background:linear-gradient(160deg,rgba(26,16,64,0.99),rgba(17,8,41,0.99));border:1px solid var(--border2);border-radius:var(--r-lg) var(--r-lg) 0 0;padding:22px;width:100%;max-width:500px;max-height:88vh;overflow-y:auto;}
+.modal-handle{width:40px;height:4px;background:var(--border2);border-radius:2px;margin:0 auto 18px;}
+.modal-title{font-family:'Space Grotesk',sans-serif;font-size:17px;font-weight:700;margin-bottom:14px;}
+.modal-close{float:right;cursor:pointer;color:var(--text3);font-size:22px;line-height:1;margin-top:-4px;}
+.form-group{margin-bottom:12px;}
+.form-group label{display:block;font-size:11px;font-weight:600;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px;}
+.form-input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);padding:11px 14px;color:var(--text);font-size:14px;font-family:'Inter',sans-serif;-webkit-appearance:none;}
+.form-input:focus{outline:none;border-color:var(--accent2);}
+.form-input::placeholder{color:var(--text3);}
+.form-input option{background:var(--surface2);}
+textarea.form-input{resize:vertical;min-height:80px;line-height:1.6;}
+.back-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:var(--r-sm);background:var(--surface2);border:1px solid var(--border2);color:var(--text2);cursor:pointer;font-size:12px;font-weight:500;margin-bottom:16px;transition:all .2s;}
+.back-btn:hover{border-color:var(--accent2);color:var(--text);}
+.loading-txt{color:var(--text3);text-align:center;padding:30px;font-size:13px;}
+.empty-state{text-align:center;padding:40px 20px;color:var(--text3);font-size:13px;}
+.amber{color:var(--amber)!important;}
+.green{color:var(--green)!important;}
+.red{color:var(--red)!important;}
+#adminNotifPanel::-webkit-scrollbar{width:4px;}
+#adminNotifPanel::-webkit-scrollbar-track{background:transparent;}
+#adminNotifPanel::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
+@media(max-width:400px){.admin-grid{grid-template-columns:1fr;}.stat-row{grid-template-columns:1fr 1fr;}}
+</style>
+</head>
+<body>
+<div id="loading">
+  <div class="logo">Munafa<span>BD</span> <span style="font-size:14px;font-weight:500;color:var(--text2)">Admin</span></div>
+  <div class="spin"></div>
+  <div style="color:var(--text3);font-size:12px">সংযোগ হচ্ছে...</div>
+</div>
+
+<div id="authScreen" class="hidden">
+<div class="auth-wrap">
+<div class="auth-box">
+  <div class="logo">Munafa<span>BD</span></div>
+  <div class="auth-sub">Admin Panel — শুধুমাত্র অ্যাডমিনের জন্য</div>
+  <div class="field"><label>ইমেইল</label><input id="loginEmail" type="email" placeholder="admin@email.com" autocomplete="email"></div>
+  <div class="field"><label>পাসওয়ার্ড</label><input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password"></div>
+  <button class="btn btn-primary" id="loginBtn" onclick="doLogin()" style="margin-top:6px">লগইন করুন →</button>
+  <button class="btn btn-surface" id="setupBtn" onclick="setupAdmin()" style="margin-top:10px">🛡️ অ্যাডমিন সেটআপ (একবার)</button>
+  <div class="setup-note">প্রথমবার ব্যবহারের আগে সেটআপ বাটনে একবার ক্লিক করুন।</div>
+</div>
+</div>
+</div>
+
+<div id="app" class="hidden">
+  <div class="topbar">
+    <div class="topbar-logo">Munafa<span>BD</span> Admin</div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div id="adminNotifBtn" onclick="toggleAdminNotifPanel()" style="position:relative;width:36px;height:36px;border-radius:50%;background:var(--surface2);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px">
+        🔔
+        <div id="adminNotifBadge" class="hidden" style="position:absolute;top:1px;right:1px;width:16px;height:16px;border-radius:50%;background:var(--red);font-size:9px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center;border:2px solid var(--bg)">0</div>
+      </div>
+      <button class="btn-logout" onclick="doLogout()">🚪 লগআউট</button>
+    </div>
+  </div>
+  <div id="adminNotifPanel" class="hidden" style="position:fixed;top:56px;right:0;left:0;z-index:500;max-width:500px;margin:0 auto;background:linear-gradient(160deg,rgba(26,16,64,0.99),rgba(17,8,41,0.99));border:1px solid var(--border2);border-top:none;border-radius:0 0 var(--r) var(--r);max-height:60vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border)">
+      <div style="font-weight:700;font-size:14px">🔔 Admin নোটিফিকেশন</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="markAllAdminNotifsRead()" style="font-size:11px;padding:4px 10px;border-radius:20px;border:1px solid var(--border2);background:none;color:var(--text2);cursor:pointer">সব পড়া</button>
+        <span onclick="toggleAdminNotifPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:0 4px">✕</span>
+      </div>
+    </div>
+    <div id="adminNotifList" style="padding:8px"></div>
+  </div>
+  <div id="mainContent"></div>
+</div>
+
+<div id="modalContainer"></div>
+<script>
+document.addEventListener('click', function(e) {
+  const panel = document.getElementById('adminNotifPanel');
+  const btn = document.getElementById('adminNotifBtn');
+  if (panel && !panel.classList.contains('hidden')) {
+    if (!panel.contains(e.target) && !btn.contains(e.target)) {
+      panel.classList.add('hidden');
+      window._adminNotifOpen = false;
+    }
+  }
+});
+</script>
+</body>
+</html>
