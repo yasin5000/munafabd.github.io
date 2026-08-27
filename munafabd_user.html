@@ -1,0 +1,2009 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>MunafaBD</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://clickincome-b5e2d-default-rtdb.firebaseio.com" crossorigin>
+<link rel="dns-prefetch" href="https://identitytoolkit.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getDatabase, ref, set, get, update, push, onValue, off, remove, runTransaction }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBy2grpQfrKE__DVBOlTEsOH2LP3caibhk",
+  authDomain: "clickincome-b5e2d.firebaseapp.com",
+  databaseURL: "https://clickincome-b5e2d-default-rtdb.firebaseio.com",
+  projectId: "clickincome-b5e2d",
+  storageBucket: "clickincome-b5e2d.firebasestorage.app",
+  messagingSenderId: "709263130801",
+  appId: "1:709263130801:web:877fde0c18ee2320606290",
+  measurementId: "G-R9200R5EHB"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getDatabase(app);
+
+window._FB = { auth, db, ref, set, get, update, push, onValue, off, remove, runTransaction };
+window._currentUID = '';
+window._popupShown = false;
+window._siteStartDate = new Date('2024-01-01');
+window._welcomePopup = {
+  enabled:true, icon:'🎉',
+  title:'MunafaBD-এ স্বাগতম!',
+  message:'আপনার অ্যাকাউন্টে লগইন করুন এবং নিরাপদে লেনদেন করুন।',
+  btn:'শুরু করুন ✅'
+};
+
+const _urlParams = new URLSearchParams(location.search);
+window._refFromUrl = _urlParams.get('ref') || '';
+
+// ── FIX 3: Hardware Back Button Prevention ──
+// Push initial state so back button doesn't exit
+history.pushState({ page: 'app' }, '', location.href);
+window.addEventListener('popstate', function(e) {
+  // Re-push state to prevent exit
+  history.pushState({ page: 'app' }, '', location.href);
+  // If popup is open, close it instead
+  const popup = document.getElementById('popupContainer');
+  if (popup && popup.innerHTML.trim() !== '') {
+    closePopup();
+    return;
+  }
+  // Otherwise go to home
+  if (window._currentUID) {
+    showPage('home');
+  }
+});
+
+onAuthStateChanged(auth, async (fireUser) => {
+  if (fireUser) {
+    window._currentUID = fireUser.uid;
+    const [snap, ppSnap, siteSnap] = await Promise.all([
+      get(ref(db, `users/${fireUser.uid}`)),
+      get(ref(db, 'settings/welcomePopup')),
+      get(ref(db,'settings/site'))
+    ]);
+    if (!snap.exists()) { await signOut(auth); return; }
+    const u = snap.val();
+    if (u.role === 'admin') { await signOut(auth); toast('এটি অ্যাডমিন অ্যাকাউন্ট', 'err'); return; }
+    if (u.status === 'disabled') { await signOut(auth); toast('আপনার অ্যাকাউন্ট নিষ্ক্রিয় করা হয়েছে', 'err'); return; }
+
+    window._userCache = u;
+    // Live listener keeps the cache fresh in the background — no more re-fetching on every page nav
+    if (window._userListenerRef) off(window._userListenerRef);
+    window._userListenerRef = ref(db, `users/${fireUser.uid}`);
+    onValue(window._userListenerRef, (s) => { if (s.exists()) window._userCache = s.val(); });
+
+    // Live listener keeps the unseen-notification count fresh in the background —
+    // updateNotifBadge() no longer does a network round trip on every page navigation.
+    if (window._notifListenerRef) off(window._notifListenerRef);
+    window._notifCount = 0;
+    window._notifListenerRef = ref(db, `notifications/${fireUser.uid}`);
+    onValue(window._notifListenerRef, (s) => {
+      let count = 0;
+      if (s.exists()) s.forEach(c => { if (!c.val().seen) count++; });
+      window._notifCount = count;
+      updateNotifBadge();
+    });
+
+    if (ppSnap.exists()) window._welcomePopup = ppSnap.val();
+    if (siteSnap.exists() && siteSnap.val().startDate) window._siteStartDate = new Date(siteSnap.val().startDate);
+
+    // Firebase is the source of truth for language once logged in (so it follows
+    // the account across devices) — falls back to the localStorage guess only
+    // when the account has never picked one.
+    if (u.language) { window._lang = u.language; try { localStorage.setItem('ci_lang', u.language); } catch(e) {} }
+    applyLanguage();
+
+    H('authScreen').classList.add('hidden');
+    H('app').classList.remove('hidden');
+    H('loading').classList.add('hidden');
+
+    showPage('home');
+    startSiteTimer();
+    if (!u.language) {
+      showLanguagePopup();
+    } else if (window._welcomePopup.enabled && !window._popupShown) {
+      window._popupShown = true;
+      showWelcomePopup();
+    }
+  } else {
+    window._currentUID = '';
+    window._userCache = null;
+    if (window._userListenerRef) { off(window._userListenerRef); window._userListenerRef = null; }
+    if (window._notifListenerRef) { off(window._notifListenerRef); window._notifListenerRef = null; }
+    window._notifCount = 0;
+    window._popupShown = false;
+    H('loading').classList.add('hidden');
+    H('authScreen').classList.remove('hidden');
+    H('app').classList.add('hidden');
+    if (window._timerInterval) clearInterval(window._timerInterval);
+  }
+});
+
+window.H = (id) => document.getElementById(id);
+window.fmt = (n) => parseFloat(n||0).toLocaleString('bn-BD');
+
+// ── FIX: "hover triggers click" bug ──
+// Touch events keep firing on the element where the finger first touched down,
+// no matter where the finger moves to before it lifts. The old code fired the
+// handler on every touchend with no check, so scrolling a finger down the
+// screen — starting on or passing over an icon — registered as a tap on that
+// icon. This wrapper only fires the handler if the finger didn't move more
+// than `threshold` px between touchstart and touchend (a real tap), and
+// otherwise treats it as a scroll/drag and ignores it.
+window.bindTap = function(el, handler, threshold) {
+  threshold = threshold || 10;
+  let startX = 0, startY = 0, moved = false;
+  el.addEventListener('touchstart', function(e){
+    const t = e.changedTouches[0];
+    startX = t.clientX; startY = t.clientY; moved = false;
+  }, {passive:true});
+  el.addEventListener('touchmove', function(e){
+    const t = e.changedTouches[0];
+    if (Math.abs(t.clientX - startX) > threshold || Math.abs(t.clientY - startY) > threshold) moved = true;
+  }, {passive:true});
+  el.addEventListener('touchend', function(e){
+    if (moved) return;
+    e.preventDefault();
+    handler(e);
+  }, {passive:false});
+  el.addEventListener('click', handler);
+};
+window.toast = (msg, type='info') => {
+  let t = document.createElement('div');
+  t.style.cssText = `position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
+    padding:10px 20px;border-radius:50px;font-size:13px;font-weight:600;z-index:99999;
+    background:${type==='ok'?'rgba(15,230,168,0.92)':type==='err'?'rgba(255,77,109,0.92)':'rgba(124,58,237,0.92)'};
+    color:#fff;box-shadow:0 6px 20px rgba(0,0,0,0.3);white-space:nowrap;max-width:90vw;text-align:center;`;
+  t.textContent = msg; document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2800);
+};
+
+window.closePopup = () => {
+  H('popupContainer').innerHTML = '';
+};
+
+async function getUser(uid) {
+  // Serve from the live in-memory cache when available — avoids a network round trip on every page.
+  if (!uid || uid === window._currentUID) {
+    if (window._userCache) return window._userCache;
+  }
+  const snap = await get(ref(db, `users/${uid||window._currentUID}`));
+  return snap.exists() ? snap.val() : null;
+}
+window.getUser = getUser;
+
+window.genRefCode = (uid) => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for(let i = 0; i < 8; i++) code += chars[Math.floor(Math.random()*chars.length)];
+  return 'CI-' + code;
+};
+
+// ── LANGUAGE / i18n ──
+// Covers the app "chrome" — bottom nav, Home icon menu, page headers, the
+// auth screen, and the Profile page. Content that's free text (admin-entered
+// card titles/descriptions, notification messages, toasts, individual
+// transaction reasons) stays Bengali-only for now.
+window._translations = {
+  bn: {
+    nav_home:'হোম', nav_wallet:'ওয়ালেট', nav_team:'টিম', nav_profile:'প্রোফাইল',
+    ig_buyshare:'Buy Share', ig_myshare:'My Share', ig_wallet:'ওয়ালেট', ig_deposit:'ডিপোজিট',
+    ig_withdraw:'উইথড্র', ig_team:'টিম', ig_transactions:'লেনদেন', ig_language:'ভাষা', ig_loan:'লোন',
+    home_top_shares:'🔥 টপ শেয়ার',
+    home_welcome_back:'স্বাগতম ফিরে 👋', home_earning:'আর্নিং', home_deposit:'ডিপোজিট',
+    home_account:'অ্যাকাউন্ট', home_active:'সক্রিয়', home_inactive:'নিষ্ক্রিয়',
+    home_site_age:'🕐 সাইটের বয়স', home_days:'দিন', home_hours:'ঘণ্টা', home_mins:'মিনিট', home_secs:'সেকেন্ড',
+    home_running_since:'২০২৪ সাল থেকে বিশ্বস্তভাবে চলছে ✅', home_our_services:'আমাদের সেবা',
+    h2_wallet:'💰 ওয়ালেট', h2_buyshare:'🛒 Buy Share', h2_myshares:'📈 মাই শেয়ার',
+    h2_deposit:'⬇️ ডিপোজিট', h2_withdraw:'⬆️ উইথড্র', h2_transfer:'🔁 ব্যালেন্স ট্রান্সফার',
+    h2_transactions:'📋 লেনদেন ইতিহাস', h2_team:'👥 আমার টিম', h2_notifications:'🔔 নোটিফিকেশন', h2_loan:'🏦 লোন',
+    auth_login_sub:'আপনার অ্যাকাউন্টে লগইন করুন', auth_register_sub:'নতুন অ্যাকাউন্ট তৈরি করুন',
+    auth_tab_login:'লগইন', auth_tab_register:'রেজিস্ট্রার',
+    auth_email:'ইমেইল', auth_password:'পাসওয়ার্ড', auth_name:'পুরো নাম', auth_phone:'ফোন নম্বর',
+    auth_refcode:'রেফারেল কোড (ঐচ্ছিক)', auth_login_btn:'লগইন করুন →', auth_register_btn:'অ্যাকাউন্ট তৈরি করুন →',
+    profile_earning_bal:'আর্নিং ব্যালেন্স', profile_deposit_bal:'ডিপোজিট ব্যালেন্স',
+    profile_joined:'যোগদান', profile_status:'স্ট্যাটাস', profile_name:'নাম', profile_phone:'ফোন নম্বর',
+    profile_email:'ইমেইল', profile_save:'💾 সংরক্ষণ করুন', profile_logout:'🚪 লগআউট', profile_code:'কোড',
+    lang_choose_title:'ভাষা নির্বাচন করুন', lang_choose_msg:'আপনার পছন্দের ভাষা বেছে নিন',
+    lang_page_title:'🌐 ভাষা', lang_current:'বর্তমান ভাষা', lang_saved:'ভাষা সংরক্ষণ করা হয়েছে ✅',
+    loan_avail_limit:'উপলব্ধ লোন লিমিট', loan_amount_label:'লোনের পরিমাণ (৳)', loan_amount_ph:'পরিমাণ লিখুন',
+    loan_service_charge:'সার্ভিস চার্জ', loan_total_repayment:'মোট পরিশোধযোগ্য', loan_due_date:'পরিশোধের তারিখ',
+    loan_apply_btn:'✅ লোন কনফার্ম করুন', loan_processing:'প্রক্রিয়া হচ্ছে...',
+    loan_info_banner:'📌 লোনের পরিমাণ লিখুন, সার্ভিস চার্জ ও মোট পরিশোধ স্বয়ংক্রিয়ভাবে হিসাব হবে। অনুমোদনের পর টাকা আপনার আর্নিং ব্যালেন্সে যোগ হবে।',
+    loan_active_notice:'⚠️ আপনার একটি লোন ইতিমধ্যে চলমান/পেন্ডিং আছে। নতুন লোনের জন্য বর্তমান লোন পরিশোধ বা নিষ্পত্তি হওয়া প্রয়োজন।',
+    loan_no_limit_set:'অ্যাডমিন এখনো লোন লিমিট নির্ধারণ করেননি।',
+    loan_status_pending:'⏳ পেন্ডিং', loan_status_approved:'✅ অনুমোদিত', loan_status_rejected:'❌ বাতিল', loan_status_repaid:'✔️ পরিশোধিত',
+    loan_my_history:'আমার লোন ইতিহাস', loan_no_history:'কোনো লোন রিকোয়েস্ট নেই',
+    loan_enter_amount:'লোনের পরিমাণ দিন', loan_exceeds:'লিমিটের বেশি পরিমাণ দিতে পারবেন না', loan_min_amt:'ন্যূনতম পরিমাণ ৳',
+    loan_applied_ok:'লোন রিকোয়েস্ট পাঠানো হয়েছে ✅', loan_days_short:'দিন',
+    loan_active_title:'🏦 সক্রিয় লোন', loan_total_amount:'মোট পরিমাণ', loan_paid_amount:'পরিশোধিত',
+    loan_remaining_amount:'বাকি আছে', loan_pay_btn:'💳 লোন পরিশোধ করুন', loan_pay_amount_label:'পরিশোধের পরিমাণ (৳)',
+    loan_confirm_payment:'✅ পরিশোধ কনফার্ম করুন', loan_status_overdue:'⚠️ মেয়াদোত্তীর্ণ', loan_status_paid:'✔️ পরিশোধিত',
+    loan_overdue_notice:'মেয়াদোত্তীর্ণ — লেট ফি যুক্ত হয়েছে', loan_insufficient_balance:'পর্যাপ্ত ওয়ালেট ব্যালেন্স নেই',
+    loan_pay_exceeds_remaining:'বাকি পরিমাণের বেশি দেওয়া যাবে না', loan_payment_success:'পরিশোধ সফল হয়েছে ✅',
+    loan_auto_approved_msg:'🎉 আপনার লোন স্বয়ংক্রিয়ভাবে অনুমোদিত হয়ে ওয়ালেটে যোগ হয়েছে!',
+    loan_elig_title:'📋 লোন Eligibility', loan_elig_ready:'✅ যোগ্য', loan_elig_notready:'⏳ শর্ত পূরণ হয়নি',
+    loan_elig_deposit:'💰 মোট ডিপোজিট', loan_elig_referral:'👥 Real Referral', loan_elig_share:'🛒 Share Buy', loan_elig_withdraw:'⬆️ Withdraw সংখ্যা',
+    loan_elig_hint:'❌ চিহ্নিত শর্তগুলো পূরণ করলে Auto-Approval-এর সম্ভাবনা বাড়বে।',
+    loan_elig_locked_title:'🔒 লোন অপশন লক করা আছে', loan_elig_locked_msg:'উপরের সবগুলো শর্ত ✅ পূরণ হলে লোন অপশন স্বয়ংক্রিয়ভাবে চালু হয়ে যাবে।',
+    loan_progress_title:'📊 লোন লিমিট অগ্রগতি', loan_current_limit:'বর্তমান লোন লিমিট', loan_next_limit:'পরবর্তী লোন লিমিট',
+    loan_repaid_count:'সম্পূর্ণ পরিশোধ সংখ্যা', loan_max_limit_reached:'🏆 সর্বোচ্চ লিমিটে পৌঁছেছেন',
+  },
+  en: {
+    nav_home:'Home', nav_wallet:'Wallet', nav_team:'Team', nav_profile:'Profile',
+    ig_buyshare:'Buy Share', ig_myshare:'My Share', ig_wallet:'Wallet', ig_deposit:'Deposit',
+    ig_withdraw:'Withdraw', ig_team:'Team', ig_transactions:'Transactions', ig_language:'Language', ig_loan:'Loan',
+    home_top_shares:'🔥 Top Shares',
+    home_welcome_back:'Welcome back 👋', home_earning:'Earning', home_deposit:'Deposit',
+    home_account:'Account', home_active:'Active', home_inactive:'Inactive',
+    home_site_age:'🕐 Site Age', home_days:'Days', home_hours:'Hrs', home_mins:'Min', home_secs:'Sec',
+    home_running_since:'Running reliably since 2024 ✅', home_our_services:'Our Services',
+    h2_wallet:'💰 Wallet', h2_buyshare:'🛒 Buy Share', h2_myshares:'📈 My Share',
+    h2_deposit:'⬇️ Deposit', h2_withdraw:'⬆️ Withdraw', h2_transfer:'🔁 Balance Transfer',
+    h2_transactions:'📋 Transaction History', h2_team:'👥 My Team', h2_notifications:'🔔 Notifications', h2_loan:'🏦 Loan',
+    auth_login_sub:'Log in to your account', auth_register_sub:'Create a new account',
+    auth_tab_login:'Login', auth_tab_register:'Register',
+    auth_email:'Email', auth_password:'Password', auth_name:'Full Name', auth_phone:'Phone Number',
+    auth_refcode:'Referral Code (optional)', auth_login_btn:'Login →', auth_register_btn:'Create Account →',
+    profile_earning_bal:'Earning Balance', profile_deposit_bal:'Deposit Balance',
+    profile_joined:'Joined', profile_status:'Status', profile_name:'Name', profile_phone:'Phone Number',
+    profile_email:'Email', profile_save:'💾 Save', profile_logout:'🚪 Logout', profile_code:'Code',
+    lang_choose_title:'Choose Language', lang_choose_msg:'Select your preferred language',
+    lang_page_title:'🌐 Language', lang_current:'Current language', lang_saved:'Language saved ✅',
+    loan_avail_limit:'Available Loan Limit', loan_amount_label:'Loan Amount (৳)', loan_amount_ph:'Enter amount',
+    loan_service_charge:'Service Charge', loan_total_repayment:'Total Repayment', loan_due_date:'Due Date',
+    loan_apply_btn:'✅ Confirm Loan', loan_processing:'Processing...',
+    loan_info_banner:'📌 Enter a loan amount — service charge and total repayment are calculated automatically. Once approved, the amount is added to your Earning Balance.',
+    loan_active_notice:'⚠️ You already have an active/pending loan. It must be settled before applying for a new one.',
+    loan_no_limit_set:'Admin has not set a loan limit yet.',
+    loan_status_pending:'⏳ Pending', loan_status_approved:'✅ Approved', loan_status_rejected:'❌ Rejected', loan_status_repaid:'✔️ Repaid',
+    loan_my_history:'My Loan History', loan_no_history:'No loan requests yet',
+    loan_enter_amount:'Enter a loan amount', loan_exceeds:'Amount exceeds your available limit', loan_min_amt:'Minimum amount ৳',
+    loan_applied_ok:'Loan request submitted ✅', loan_days_short:'days',
+    loan_active_title:'🏦 Active Loan', loan_total_amount:'Total Amount', loan_paid_amount:'Paid Amount',
+    loan_remaining_amount:'Remaining', loan_pay_btn:'💳 Pay Loan', loan_pay_amount_label:'Payment Amount (৳)',
+    loan_confirm_payment:'✅ Confirm Payment', loan_status_overdue:'⚠️ Overdue', loan_status_paid:'✔️ Paid',
+    loan_overdue_notice:'Overdue — a late fee has been added', loan_insufficient_balance:'Insufficient wallet balance',
+    loan_pay_exceeds_remaining:'Cannot pay more than the remaining amount', loan_payment_success:'Payment successful ✅',
+    loan_auto_approved_msg:'🎉 Your loan was auto-approved and added to your wallet!',
+    loan_elig_title:'📋 Loan Eligibility', loan_elig_ready:'✅ Eligible', loan_elig_notready:'⏳ Not complete yet',
+    loan_elig_deposit:'💰 Total Deposit', loan_elig_referral:'👥 Real Referral', loan_elig_share:'🛒 Share Buy', loan_elig_withdraw:'⬆️ Withdraw Count',
+    loan_elig_hint:'❌ Completing the marked requirements improves your Auto-Approval chances.',
+    loan_elig_locked_title:'🔒 Loan Option Locked', loan_elig_locked_msg:'The loan option unlocks automatically once all requirements above are ✅ complete.',
+    loan_progress_title:'📊 Loan Limit Progress', loan_current_limit:'Current Loan Limit', loan_next_limit:'Next Loan Limit',
+    loan_repaid_count:'Full Repayments Count', loan_max_limit_reached:'🏆 Maximum limit reached',
+  }
+};
+try { window._lang = localStorage.getItem('ci_lang') || 'bn'; } catch(e) { window._lang = 'bn'; }
+
+window.tr = (key) => {
+  const lang = window._lang || 'bn';
+  return (window._translations[lang] && window._translations[lang][key]) || window._translations.bn[key] || key;
+};
+
+// Updates the parts of the UI that are static HTML (not re-rendered per
+// navigation) — the bottom nav and the login/register auth screen.
+window.applyLanguage = () => {
+  const navKeys = { 'nav-home':'nav_home', 'nav-wallet':'nav_wallet', 'nav-team':'nav_team', 'nav-profile':'nav_profile' };
+  Object.keys(navKeys).forEach(id => {
+    const el = H(id); if (el) { const sp = el.querySelector('span'); if (sp) sp.textContent = tr(navKeys[id]); }
+  });
+  const tl = H('tabLogin'), trg = H('tabRegister'), sub = H('authSubText');
+  if (tl) tl.textContent = tr('auth_tab_login');
+  if (trg) trg.textContent = tr('auth_tab_register');
+  if (sub) sub.textContent = (tl && tl.classList.contains('active')) ? tr('auth_login_sub') : tr('auth_register_sub');
+  const lb = H('loginBtn'); if (lb) lb.textContent = tr('auth_login_btn');
+  const rb = H('regBtn'); if (rb) rb.textContent = tr('auth_register_btn');
+  const labelMap = { loginEmail:'auth_email', loginPass:'auth_password', regName:'auth_name',
+    regPhone:'auth_phone', regEmail:'auth_email', regPass:'auth_password', regRef:'auth_refcode' };
+  Object.keys(labelMap).forEach(id => {
+    const input = H(id);
+    if (input && input.parentElement) { const lab = input.parentElement.querySelector('label'); if (lab) lab.textContent = tr(labelMap[id]); }
+  });
+};
+
+// Saves the choice (localStorage for instant reload + Firebase so it follows
+// the account across devices), then re-renders whatever page is on screen.
+window.setLanguage = async (lang) => {
+  window._lang = lang;
+  try { localStorage.setItem('ci_lang', lang); } catch(e) {}
+  if (window._currentUID) {
+    try { await update(ref(db, `users/${window._currentUID}`), { language: lang }); } catch(e) {}
+  }
+  applyLanguage();
+  closePopup();
+  if (window._currentUID) {
+    showPage(window._currentPage || 'home');
+    toast(tr('lang_saved'), 'ok');
+    if (window._welcomePopup && window._welcomePopup.enabled && !window._popupShown) {
+      window._popupShown = true;
+      showWelcomePopup();
+    }
+  }
+};
+
+window.showLanguagePopup = () => {
+  H('popupContainer').innerHTML = `<div class="popup-bg">
+    <div class="popup-box">
+      <div class="popup-icon">🌐</div>
+      <div class="popup-title">Choose Language / ভাষা নির্বাচন করুন</div>
+      <div class="popup-msg">Select your preferred language to continue.<br>আপনার পছন্দের ভাষা বেছে নিন।</div>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-primary" style="flex:1" onclick="setLanguage('en')">🇬🇧 English</button>
+        <button class="btn btn-primary" style="flex:1" onclick="setLanguage('bn')">🇧🇩 বাংলা</button>
+      </div>
+    </div>
+  </div>`;
+};
+applyLanguage();
+
+// ── SITE TIMER ──
+window.startSiteTimer = () => {
+  if (window._timerInterval) clearInterval(window._timerInterval);
+  window._timerInterval = setInterval(() => {
+    const now = new Date();
+    const diff = now - window._siteStartDate;
+    const days = Math.floor(diff / 86400000);
+    const hrs = Math.floor((diff % 86400000) / 3600000);
+    const mins = Math.floor((diff % 3600000) / 60000);
+    const secs = Math.floor((diff % 60000) / 1000);
+    const dEl = H('t_days'), hEl = H('t_hrs'), mEl = H('t_mins'), sEl = H('t_secs');
+    if(dEl) dEl.textContent = String(days).padStart(2,'0');
+    if(hEl) hEl.textContent = String(hrs).padStart(2,'0');
+    if(mEl) mEl.textContent = String(mins).padStart(2,'0');
+    if(sEl) sEl.textContent = String(secs).padStart(2,'0');
+  }, 1000);
+};
+
+// ── AUTH ──
+window.doRegister = async () => {
+  const name = H('regName').value.trim();
+  const phone = H('regPhone').value.trim();
+  const email = H('regEmail').value.trim();
+  const pass = H('regPass').value;
+  const refCode = H('regRef').value.trim();
+  if (!name||!phone||!email||!pass) { toast('সব তথ্য পূরণ করুন','err'); return; }
+  if (pass.length < 6) { toast('পাসওয়ার্ড কমপক্ষে ৬ অক্ষর','err'); return; }
+  const btn = H('regBtn'); btn.disabled = true; btn.textContent = 'অপেক্ষা করুন...';
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, email, pass);
+    const uid = cred.user.uid;
+    let referredBy = '', referrerUID = '';
+    const refToCheck = refCode || window._refFromUrl;
+    if (refToCheck) {
+      const allUsersSnap = await get(ref(db,'users'));
+      if(allUsersSnap.exists()) {
+        allUsersSnap.forEach(c => {
+          const u = c.val();
+          if(u.referralCode === refToCheck || c.key === refToCheck) {
+            referredBy = refToCheck; referrerUID = c.key;
+          }
+        });
+      }
+    }
+    const myRefCode = genRefCode(uid);
+    await set(ref(db, `users/${uid}`), {
+      uid, name, email, phone, role:'user', earningBalance:0, depositBalance:0, status:'active',
+      createdAt: Date.now(), referralCode: myRefCode,
+      referredBy: referredBy || '', referrerUID: referrerUID || ''
+    });
+    if (referrerUID) {
+      // ── SECURE BALANCE UPDATE: runTransaction avoids lost-update races when
+      // multiple referred users sign up for the same referrer at the same time ──
+      const rTx = await runTransaction(ref(db,`users/${referrerUID}/earningBalance`), (cur) => (Number(cur)||0) + 50);
+      if (rTx.committed) {
+        const newRBal = Number(rTx.snapshot.val()||0);
+        await push(ref(db,`balanceHistory/${referrerUID}`), {
+          type:'credit', amount:50, reason:`রেফারেল বোনাস (আর্নিং) — ${name}`,
+          balanceAfter: newRBal, date:'এইমাত্র', ts:Date.now()
+        });
+        await push(ref(db,`notifications/${referrerUID}`), {
+          msg:`🎉 ${name} আপনার রেফারেল লিংক দিয়ে যোগ দিয়েছেন! ৳৫০ বোনাস পেয়েছেন।`,
+          seen:false, date:'এইমাত্র', ts:Date.now()
+        });
+      }
+    }
+    await push(ref(db, `notifications/${uid}`), {
+      msg:`${name}, MunafaBD-এ স্বাগতম! 🎉 আপনার রেফারেল কোড: ${myRefCode}`,
+      seen:false, date:'এইমাত্র', ts:Date.now()
+    });
+    toast('অ্যাকাউন্ট তৈরি হয়েছে! ✅','ok');
+    switchTab('login');
+    H('loginEmail').value = email;
+  } catch(e) {
+    let msg = 'রেজিস্ট্রেশন ব্যর্থ হয়েছে';
+    if (e.code === 'auth/email-already-in-use') msg = 'এই ইমেইল ইতিমধ্যে নিবন্ধিত';
+    toast(msg,'err');
+  }
+  btn.disabled = false; btn.textContent = 'অ্যাকাউন্ট তৈরি করুন →';
+};
+
+window.doLogin = async () => {
+  const email = H('loginEmail').value.trim();
+  const pass = H('loginPass').value;
+  if (!email||!pass) { toast('ইমেইল ও পাসওয়ার্ড দিন','err'); return; }
+  const btn = H('loginBtn'); btn.disabled = true; btn.textContent = 'লগইন হচ্ছে...';
+  try {
+    await signInWithEmailAndPassword(auth, email, pass);
+  } catch(e) {
+    toast('ইমেইল বা পাসওয়ার্ড ভুল','err');
+    btn.disabled = false; btn.textContent = 'লগইন করুন →';
+  }
+};
+
+window.doLogout = async () => {
+  window._popupShown = false;
+  if (window._timerInterval) clearInterval(window._timerInterval);
+  await signOut(auth);
+};
+
+window.switchTab = (tab) => {
+  H('loginForm').classList.toggle('hidden', tab!=='login');
+  H('registerForm').classList.toggle('hidden', tab==='login');
+  H('tabLogin').classList.toggle('active', tab==='login');
+  H('tabRegister').classList.toggle('active', tab!=='login');
+  H('authSubText').textContent = tab==='login'?tr('auth_login_sub'):tr('auth_register_sub');
+  if(tab==='register' && window._refFromUrl) {
+    setTimeout(()=>{ const el=H('regRef'); if(el) el.value=window._refFromUrl; },50);
+  }
+};
+
+// ── NOTIFICATION BADGE ──
+// Reads from the live in-memory count kept fresh by the onValue listener set up at login —
+// no network round trip here, so switching pages stays fast.
+window.updateNotifBadge = () => {
+  const count = window._notifCount || 0;
+  const b = H('notifBadge');
+  if (b) {
+    if (count > 0) { b.textContent = count>9?'9+':count; b.classList.remove('hidden'); }
+    else b.classList.add('hidden');
+  }
+};
+
+window.showWelcomePopup = () => {
+  const p = window._welcomePopup;
+  H('popupContainer').innerHTML = `<div class="popup-bg">
+    <div class="popup-box">
+      <div class="popup-icon">${p.icon}</div>
+      <div class="popup-title">${p.title}</div>
+      <div class="popup-msg">${p.message}</div>
+      <button class="btn btn-primary" onclick="closePopup()">${p.btn}</button>
+    </div>
+  </div>`;
+};
+
+// ── NAVIGATION ──
+window.setNav = (id) => {
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  const el = H('nav-'+id); if (el) el.classList.add('active');
+};
+
+window.showPage = (page) => {
+  window._currentPage = page;
+  const pages = {
+    home: renderHome, wallet: renderWallet, team: renderTeam,
+    profile: renderProfile, notifications: renderNotifications,
+    deposit: renderDeposit, withdraw: renderWithdraw, transactions: renderTransactions,
+    buyshare: renderBuyShare, myshares: renderMyShares, transfer: renderTransfer,
+    language: renderLanguagePage, loan: renderLoanPage
+  };
+  if (pages[page]) pages[page]();
+  const navMap = { home:'home', wallet:'wallet', team:'team', profile:'profile',
+    notifications:'home', deposit:'wallet', withdraw:'wallet', transactions:'wallet', buyshare:'home',
+    myshares:'home', transfer:'wallet', language:'home', loan:'home' };
+  setNav(navMap[page] || page);
+  window.scrollTo(0, 0);
+};
+
+// ══════════════ HOME PAGE ══════════════
+window.renderHome = async () => {
+  H('mainContent').innerHTML = `<div class="page"><div class="skeleton-loader">⏳ লোড হচ্ছে...</div></div>`;
+  const u = await getUser();
+  if (!u) return;
+
+  // Mobile touch binding will run after HTML is set
+  const bindIconTouches = () => {
+    document.querySelectorAll('.ig-item[data-action]').forEach(el => {
+      // Remove old listeners by cloning
+      const clone = el.cloneNode(true);
+      el.parentNode.replaceChild(clone, el);
+      const action = clone.getAttribute('data-action');
+      const arg    = clone.getAttribute('data-arg') || '';
+      const handler = () => {
+        if (action === 'showPage') showPage(arg);
+      };
+      window.bindTap(clone, handler);
+    });
+  };
+
+  // Notice text rarely changes — cache it for 60s so repeated home visits in a session
+  // don't each cost a network round trip.
+  const NOTICE_TTL = 60000;
+  if (!window._noticeCache || Date.now() - (window._noticeCacheTs||0) > NOTICE_TTL) {
+    const noticeSnap = await get(ref(db, 'settings/notice'));
+    window._noticeCache = noticeSnap.exists() ? noticeSnap.val() : 'MunafaBD-এ স্বাগতম! সকলের জন্য নিরাপদ ও বিশ্বস্ত প্ল্যাটফর্ম। 🎉';
+    window._noticeCacheTs = Date.now();
+  }
+  const notice = window._noticeCache;
+  const statusActive = u.status === 'active';
+
+  // ── TOP SHARE LIST ── shares the admin has flagged with "Send to Top"
+  // (isTop === true). Shown right below the home icon grid. Only active,
+  // non-expired offers with an image are included.
+  const topShareSnap = await get(ref(db, 'buyShareCards'));
+  const now2 = Date.now();
+  const topShares = [];
+  if (topShareSnap.exists()) topShareSnap.forEach(c => {
+    const v = c.val();
+    if (v && v.isTop && v.imageUrl && v.endTime > now2) topShares.push({ key: c.key, ...v });
+  });
+  topShares.sort((a,b)=>(a.endTime||0)-(b.endTime||0));
+
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left">
+      <div class="th-logo">Munafa<span>BD</span></div>
+    </div>
+    <div class="th-right">
+      <div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div>
+    </div>
+  </div>
+  <div class="page">
+    <div class="welcome-banner">
+      <div class="wb-glow"></div>
+      <div class="wb-content">
+        <div class="wb-greet">${tr('home_welcome_back')}</div>
+        <div class="wb-name">${u.name}</div>
+        <div class="wb-bal">${tr('home_earning')}: <strong>৳ ${fmt(u.earningBalance)}</strong> &nbsp;•&nbsp; ${tr('home_deposit')}: <strong>৳ ${fmt(u.depositBalance)}</strong></div>
+      </div>
+      <div class="wb-avatar">${u.name[0].toUpperCase()}</div>
+    </div>
+
+    <div class="status-banner ${statusActive ? 'status-active' : 'status-inactive'}">
+      <span class="status-dot"></span>
+      <span>${tr('home_account')} <strong>${statusActive ? tr('home_active') : tr('home_inactive')}</strong></span>
+    </div>
+
+    <div class="timer-card">
+      <div class="timer-card-title">${tr('home_site_age')}</div>
+      <div class="timer-blocks">
+        <div class="t-block"><div class="t-num" id="t_days">00</div><div class="t-lbl">${tr('home_days')}</div></div>
+        <div class="t-sep">:</div>
+        <div class="t-block"><div class="t-num" id="t_hrs">00</div><div class="t-lbl">${tr('home_hours')}</div></div>
+        <div class="t-sep">:</div>
+        <div class="t-block"><div class="t-num" id="t_mins">00</div><div class="t-lbl">${tr('home_mins')}</div></div>
+        <div class="t-sep">:</div>
+        <div class="t-block"><div class="t-num" id="t_secs">00</div><div class="t-lbl">${tr('home_secs')}</div></div>
+      </div>
+      <div class="timer-sub">${tr('home_running_since')}</div>
+    </div>
+
+    <div class="notice-wrap">
+      <div class="notice-tag">📢</div>
+      <div class="notice-scroll">
+        <div class="marquee-inner">${notice} &nbsp;&nbsp;&nbsp; ${notice}</div>
+      </div>
+    </div>
+
+    <div class="sec-title">${tr('home_our_services')}</div>
+    <div class="icon-grid">
+      <div class="ig-item" data-action="showPage" data-arg="buyshare" onclick="showPage('buyshare')">
+        <div class="ig-icon buyshare-icon">🛒</div>
+        <div class="ig-lbl">${tr('ig_buyshare')}</div>
+      </div>
+      <div class="ig-item" data-action="showPage" data-arg="myshares" onclick="showPage('myshares')">
+        <div class="ig-icon myshare-icon">📈</div>
+        <div class="ig-lbl">${tr('ig_myshare')}</div>
+      </div>
+      <div class="ig-item" data-action="showPage" data-arg="wallet" onclick="showPage('wallet')">
+        <div class="ig-icon wallet-icon">💰</div>
+        <div class="ig-lbl">${tr('ig_wallet')}</div>
+      </div>
+      <div class="ig-item" data-action="showPage" data-arg="deposit" onclick="showPage('deposit')">
+        <div class="ig-icon dep-icon">⬇️</div>
+        <div class="ig-lbl">${tr('ig_deposit')}</div>
+      </div>
+      <div class="ig-item" data-action="showPage" data-arg="withdraw" onclick="showPage('withdraw')">
+        <div class="ig-icon wit-icon">⬆️</div>
+        <div class="ig-lbl">${tr('ig_withdraw')}</div>
+      </div>
+      <div class="ig-item" data-action="showPage" data-arg="team" onclick="showPage('team')">
+        <div class="ig-icon team-icon">👥</div>
+        <div class="ig-lbl">${tr('ig_team')}</div>
+      </div>
+      <div class="ig-item" data-action="showPage" data-arg="transactions" onclick="showPage('transactions')">
+        <div class="ig-icon tx-icon">📋</div>
+        <div class="ig-lbl">${tr('ig_transactions')}</div>
+      </div>
+      <div class="ig-item" data-action="showPage" data-arg="language" onclick="showPage('language')">
+        <div class="ig-icon lang-icon">🌐</div>
+        <div class="ig-lbl">${tr('ig_language')}</div>
+      </div>
+      <div class="ig-item" data-action="showPage" data-arg="loan" onclick="showPage('loan')">
+        <div class="ig-icon loan-icon">🏦</div>
+        <div class="ig-lbl">${tr('ig_loan')}</div>
+      </div>
+    </div>
+
+    ${topShares.length ? `
+    <div class="sec-title">${tr('home_top_shares')}</div>
+    ${topShares.map(c => `
+    <div class="bs-card" style="margin-bottom:14px;cursor:pointer" onclick="renderShareDetail('${c.key}')">
+      <img class="bs-thumb" src="${c.imageUrl}" alt="${c.title||''}" loading="lazy">
+      <div class="bs-timer bs-offer-timer" data-endtime="${c.endTime}">--</div>
+      <div style="padding:12px 14px 14px">
+        <div style="font-size:15px;font-weight:700;color:var(--green)">৳${fmt(c.price)}</div>
+        <div style="font-size:14px;font-weight:600;margin-top:3px">${c.title||''}</div>
+        ${c.description ? `<div style="font-size:12px;color:var(--text3);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.description}</div>` : ''}
+        ${c.profitAmount ? `<div style="font-size:12px;font-weight:700;color:#f59e0b;margin-top:5px">🎁 ${c.durationDays||0} দিনে লাভ ৳${fmt(c.profitAmount)}</div>` : ''}
+      </div>
+    </div>`).join('')}` : ''}
+  </div>`;
+
+  updateNotifBadge();
+  startSiteTimer();
+  bindIconTouches();
+  if (topShares.length) startBuyShareOfferCountdowns();
+};
+
+// ══ WALLET ══
+window.renderWallet = async () => {
+  const u = await getUser();
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="th-logo">Munafa<span>BD</span></div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_wallet')}</h2>
+    <div class="balance-card">
+      <div class="balance-label">আর্নিং ব্যালেন্স</div>
+      <div class="balance-amt">৳ ${fmt(u.earningBalance)}</div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.5)">উইথড্র ও ডিপোজিটে ট্রান্সফারযোগ্য</div>
+    </div>
+    <div class="balance-card" style="margin-top:-2px">
+      <div class="balance-label">ডিপোজিট ব্যালেন্স</div>
+      <div class="balance-amt">৳ ${fmt(u.depositBalance)}</div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.5)">শুধুমাত্র শেয়ার কেনার জন্য • উইথড্রযোগ্য নয়</div>
+    </div>
+    <div class="wallet-actions">
+      <div class="wa-btn" onclick="showPage('deposit')"><div class="wa-icon dep-icon">⬇️</div><div class="wa-lbl">ডিপোজিট</div></div>
+      <div class="wa-btn" onclick="showPage('withdraw')"><div class="wa-icon wit-icon">⬆️</div><div class="wa-lbl">উইথড্র</div></div>
+      <div class="wa-btn" onclick="showPage('transfer')"><div class="wa-icon transfer-icon">🔁</div><div class="wa-lbl">ট্রান্সফার</div></div>
+      <div class="wa-btn" onclick="showPage('transactions')"><div class="wa-icon tx-icon">📋</div><div class="wa-lbl">ইতিহাস</div></div>
+    </div>
+    <div class="sec-title">সাম্প্রতিক লেনদেন</div>
+    <div id="walletHistBox"><div style="color:var(--text3);text-align:center;padding:20px">লোড হচ্ছে...</div></div>
+  </div>`;
+  updateNotifBadge();
+  const histSnap = await get(ref(db, `balanceHistory/${window._currentUID}`));
+  const hist = [];
+  if (histSnap.exists()) histSnap.forEach(c => { hist.push(c.val()); });
+  hist.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const box = H('walletHistBox');
+  if (!hist.length) { box.innerHTML='<p style="color:var(--text3);text-align:center;padding:20px">কোনো লেনদেন নেই</p>'; return; }
+  box.innerHTML = hist.slice(0,5).map(h=>`
+    <div class="list-item">
+      <div class="li-left">
+        <div class="li-icon" style="background:${h.type==='credit'?'rgba(15,230,168,0.15)':'rgba(255,77,109,0.15)'}">${h.type==='credit'?'➕':'➖'}</div>
+        <div><div class="li-title">${h.reason||''}</div><div class="li-sub">${h.date||''}</div></div>
+      </div>
+      <div class="li-amt" style="color:${h.type==='credit'?'var(--green)':'var(--red)'}">
+        ${h.type==='credit'?'+':'-'}৳${fmt(h.amount)}
+      </div>
+    </div>`).join('');
+};
+
+// ══ BUY SHARE ══
+window.renderBuyShare = async () => {
+  H('mainContent').innerHTML = `<div class="page"><div class="skeleton-loader">⏳ লোড হচ্ছে...</div></div>`;
+  const bsSnap = await get(ref(db, 'buyShareCards'));
+  const now = Date.now();
+  const cards = [];
+  if (bsSnap.exists()) bsSnap.forEach(c => { const v = c.val(); if (v && v.imageUrl && v.endTime > now) cards.push({ key:c.key, ...v }); });
+  cards.sort((a,b)=>(a.endTime||0)-(b.endTime||0));
+
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="th-logo">Munafa<span>BD</span></div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_buyshare')}</h2>
+    ${cards.length ? cards.map(c => `
+    <div class="bs-card" style="margin-bottom:18px;cursor:pointer" onclick="renderShareDetail('${c.key}')">
+      <img class="bs-thumb" src="${c.imageUrl}" alt="${c.title||''}" loading="lazy">
+      <div class="bs-timer bs-offer-timer" data-endtime="${c.endTime}">--</div>
+      <div style="padding:12px 14px 14px">
+        <div style="font-size:15px;font-weight:700;color:var(--green)">৳${fmt(c.price)}</div>
+        <div style="font-size:14px;font-weight:600;margin-top:3px">${c.title||''}</div>
+        ${c.description ? `<div style="font-size:12px;color:var(--text3);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.description}</div>` : ''}
+        ${c.profitAmount ? `<div style="font-size:12px;font-weight:700;color:#f59e0b;margin-top:5px">🎁 ${c.durationDays||0} দিনে লাভ ৳${fmt(c.profitAmount)}</div>` : ''}
+      </div>
+    </div>
+    `).join('') : `
+    <div class="card" style="text-align:center;padding:40px 10px;color:var(--text3)">এই মুহূর্তে কোনো সক্রিয় অফার নেই</div>`}
+  </div>`;
+
+  updateNotifBadge();
+  if (cards.length) startBuyShareOfferCountdowns();
+};
+
+// ══ MY SHARES (separate view page, accessed from home icon menu) ══
+window.renderMyShares = async () => {
+  H('mainContent').innerHTML = `<div class="page"><div class="skeleton-loader">⏳ লোড হচ্ছে...</div></div>`;
+  const mySnap = await get(ref(db, `myShares/${window._currentUID}`));
+  const now = Date.now();
+  const myShares = [];
+  if (mySnap.exists()) mySnap.forEach(c => { myShares.push({ key:c.key, ...c.val() }); });
+  myShares.sort((a,b)=>(b.purchasedAt||0)-(a.purchasedAt||0));
+
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="back-btn" onclick="showPage('home')">← ফিরে যান</div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_myshares')} ${myShares.length ? (window._lang==='en' ? `(${myShares.length} • Active ${myShares.filter(s=>s.endTime>now).length})` : `(${myShares.length}টি • সক্রিয় ${myShares.filter(s=>s.endTime>now).length}টি)`) : ''}</h2>
+    <div id="myShareList">
+      ${myShares.length ? myShares.map(s => `
+        <div class="bs-card myshare-card" style="margin-bottom:12px">
+          <img class="bs-thumb" src="${s.imageUrl}" alt="${s.title||''}" loading="lazy">
+          <div class="bs-timer myshare-timer" data-endtime="${s.endTime}">--</div>
+          <div style="padding:12px 14px 14px">
+            <div style="font-size:15px;font-weight:700;color:var(--green)">৳${fmt(s.price)}</div>
+            <div style="font-size:14px;font-weight:600;margin-top:3px">${s.title||''}</div>
+            ${s.description ? `<div style="font-size:12px;color:var(--text3);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.description}</div>` : ''}
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+              ${s.profitAmount ? `<span style="font-size:12px;font-weight:700;color:#f59e0b">🎁 লাভ ৳${fmt(s.profitAmount)}</span>` : `<span style="font-size:12px;color:var(--text3)">৳${fmt(s.price)} মূল্যে কেনা</span>`}
+              <span style="font-size:11px;font-weight:700" class="myshare-status ${s.endTime>now?'green':'green'}" data-endtime="${s.endTime}">${s.endTime>now?'⏳ চলমান':'✅ COMPLETED'}</span>
+            </div>
+          </div>
+        </div>`).join('') : `<div class="card" style="text-align:center;padding:24px;color:var(--text3)">এখনো কোনো শেয়ার কেনা হয়নি</div>`}
+    </div>
+  </div>`;
+
+  updateNotifBadge();
+  if (myShares.length) startMyShareCountdowns();
+};
+
+window.renderShareDetail = async (cardId) => {
+  H('mainContent').innerHTML = `<div class="page"><div class="skeleton-loader">⏳ লোড হচ্ছে...</div></div>`;
+  const snap = await get(ref(db, `buyShareCards/${cardId}`));
+  if (!snap.exists()) { toast('অফার পাওয়া যায়নি','err'); renderBuyShare(); return; }
+  const c = snap.val();
+  const now = Date.now();
+  const active = c.endTime > now;
+
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="th-logo">Munafa<span>BD</span></div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <div class="back-btn" onclick="renderBuyShare()">← ফিরে যান</div>
+    <div class="bs-card" style="margin-bottom:16px">
+      <img class="bs-thumb" src="${c.imageUrl||''}" alt="${c.title||''}" style="width:100%;height:auto;max-height:260px;object-fit:cover">
+      <div class="bs-timer bs-offer-timer" data-endtime="${c.endTime}">--</div>
+      <div style="padding:14px 16px">
+        <div style="font-size:17px;font-weight:700;color:var(--green)">৳${fmt(c.price)}</div>
+        <div style="font-size:16px;font-weight:700;margin-top:4px">${c.title||''}</div>
+      </div>
+    </div>
+    ${c.description ? `<div class="info-banner">${c.description}</div>` : ''}
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"><span style="color:var(--text3);font-size:13px">দাম</span><span style="font-weight:700;color:var(--green)">৳${fmt(c.price)}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--text3);font-size:13px">শেয়ারের মেয়াদ</span><span style="font-weight:700">${c.durationDays||0} দিন</span>
+      </div>
+      ${c.profitAmount ? `<div style="display:flex;justify-content:space-between;padding:6px 0"><span style="color:var(--text3);font-size:13px">মেয়াদ শেষে লাভ</span><span style="font-weight:700;color:#f59e0b">🎁 ৳${fmt(c.profitAmount)}</span></div>` : ''}
+    </div>
+    ${active
+      ? `<button class="btn btn-primary" id="bsBuyBtn_${cardId}" onclick="buyShare('${cardId}')">🛒 কিনুন — ৳${fmt(c.price)}</button>`
+      : `<div class="card" style="text-align:center;padding:16px;color:var(--text3)">⛔ এই অফারের মেয়াদ শেষ হয়ে গেছে</div>`}
+  </div>`;
+
+  if (active) startBuyShareOfferCountdowns();
+};
+
+window.buyShare = async (cardId) => {
+  const btn = H('bsBuyBtn_'+cardId);
+  const snap = await get(ref(db, `buyShareCards/${cardId}`));
+  if (!snap.exists()) { toast('অফার পাওয়া যায়নি','err'); return; }
+  const bs = snap.val();
+  if (!(bs.endTime > Date.now())) { toast('অফারের মেয়াদ শেষ হয়ে গেছে','err'); renderBuyShare(); return; }
+  const u = await getUser();
+  if (!u || Number(u.depositBalance) < Number(bs.price)) { toast('পর্যাপ্ত ডিপোজিট ব্যালেন্স নেই','err'); return; }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'প্রক্রিয়া হচ্ছে...'; }
+  try {
+    // ── SECURE BALANCE UPDATE: transaction re-checks the deposit balance at the
+    // moment of write (not just from the stale cached read above) and aborts
+    // the whole purchase if funds are insufficient, preventing a negative balance ──
+    let insufficient = false;
+    const price = Number(bs.price);
+    const balTx = await runTransaction(ref(db, `users/${window._currentUID}/depositBalance`), (cur) => {
+      const c = Number(cur)||0;
+      if (c < price) { insufficient = true; return; } // abort, no write happens
+      return c - price;
+    });
+    if (insufficient || !balTx.committed) { toast('পর্যাপ্ত ডিপোজিট ব্যালেন্স নেই','err'); if (btn) { btn.disabled = false; btn.textContent = `🛒 কিনুন — ৳${fmt(bs.price)}`; } return; }
+    const newBal = Number(balTx.snapshot.val()||0);
+    const endTime = Date.now() + Number(bs.durationDays) * 86400000;
+    await push(ref(db, `myShares/${window._currentUID}`), {
+      title: bs.title, imageUrl: bs.imageUrl, price: bs.price, durationDays: bs.durationDays,
+      description: bs.description || '', profitAmount: bs.profitAmount || 0,
+      purchasedAt: Date.now(), endTime
+    });
+    await push(ref(db, `balanceHistory/${window._currentUID}`), {
+      type:'debit', amount:bs.price, reason:'শেয়ার ক্রয় (ডিপোজিট ব্যালেন্স)', balanceAfter:newBal, date:'এইমাত্র', ts:Date.now()
+    });
+    await push(ref(db, `notifications/${window._currentUID}`), {
+      msg:`🛒 আপনি ৳${fmt(bs.price)} দিয়ে "${bs.title}" শেয়ার কিনেছেন!`, seen:false, date:'এইমাত্র', ts:Date.now()
+    });
+    toast('শেয়ার কেনা সফল হয়েছে ✅','ok');
+    renderBuyShare();
+  } catch (e) {
+    toast('সমস্যা হয়েছে','err');
+    if (btn) { btn.disabled = false; btn.textContent = `🛒 কিনুন — ৳${fmt(bs.price)}`; }
+  }
+};
+
+window.startBuyShareOfferCountdowns = () => {
+  if (window._bsInterval) clearInterval(window._bsInterval);
+  const tick = () => {
+    const els = document.querySelectorAll('.bs-offer-timer');
+    if (!els.length) { clearInterval(window._bsInterval); return; }
+    els.forEach(el => {
+      const endTime = Number(el.getAttribute('data-endtime'));
+      const diff = endTime - Date.now();
+      if (diff <= 0) { el.textContent = 'শেষ'; return; }
+      const d = Math.floor(diff/86400000);
+      const h = Math.floor((diff%86400000)/3600000);
+      const m = Math.floor((diff%3600000)/60000);
+      const s = Math.floor((diff%60000)/1000);
+      el.textContent = `${d}দ ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    });
+  };
+  tick();
+  window._bsInterval = setInterval(tick, 1000);
+};
+
+window.startMyShareCountdowns = () => {
+  if (window._myShareInterval) clearInterval(window._myShareInterval);
+  const tick = () => {
+    const els = document.querySelectorAll('.myshare-timer');
+    if (!els.length) { clearInterval(window._myShareInterval); return; }
+    els.forEach(el => {
+      const endTime = Number(el.getAttribute('data-endtime'));
+      const diff = endTime - Date.now();
+      if (diff <= 0) { el.textContent = '✅ COMPLETED'; return; }
+      const d = Math.floor(diff/86400000);
+      const h = Math.floor((diff%86400000)/3600000);
+      const m = Math.floor((diff%3600000)/60000);
+      const s = Math.floor((diff%60000)/1000);
+      el.textContent = `${d}দ ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    });
+    document.querySelectorAll('.myshare-status').forEach(el => {
+      const endTime = Number(el.getAttribute('data-endtime'));
+      if (endTime - Date.now() <= 0) el.textContent = '✅ COMPLETED';
+    });
+  };
+  tick();
+  window._myShareInterval = setInterval(tick, 1000);
+};
+
+// ══ DEPOSIT ══
+window.renderDeposit = async () => {
+  const paySnap = await get(ref(db,'settings/payment'));
+  const pay = paySnap.exists() ? paySnap.val() : { bkash:'01XXXXXXXXXX', nagad:'01XXXXXXXXXX' };
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="back-btn" onclick="showPage('wallet')">← ফিরে যান</div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_deposit')}</h2>
+    <div class="info-banner">📌 নিচের নম্বরে Send Money করুন, তারপর Transaction ID দিয়ে সাবমিট করুন। অনুমোদনের পর টাকা আপনার <strong>ডিপোজিট ব্যালেন্সে</strong> যোগ হবে।</div>
+    <div class="card">
+      <div class="pay-method active">
+        <div class="pay-logo bkash-logo">bKash</div>
+        <div><div style="font-weight:600;font-size:13px">bKash নম্বর</div><div style="font-size:18px;font-weight:700;color:var(--accent2);letter-spacing:1px">${pay.bkash||'01XXXXXXXXXX'}</div></div>
+      </div>
+      <div class="pay-method" style="margin-top:10px">
+        <div class="pay-logo nagad-logo">Nagad</div>
+        <div><div style="font-weight:600;font-size:13px">Nagad নম্বর</div><div style="font-size:18px;font-weight:700;color:var(--amber);letter-spacing:1px">${pay.nagad||'01XXXXXXXXXX'}</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="form-group"><label>পরিমাণ (৳)</label><input id="depAmt" class="form-input" type="number" placeholder="ন্যূনতম ১০০"></div>
+      <div class="form-group"><label>পেমেন্ট পদ্ধতি</label>
+        <select id="depMethod" class="form-input"><option value="bkash">bKash</option><option value="nagad">Nagad</option></select>
+      </div>
+      <div class="form-group"><label>ট্রানজেকশন আইডি</label><input id="depTxId" class="form-input" placeholder="TX আইডি লিখুন"></div>
+      <button class="btn btn-green" id="depBtn" onclick="submitDeposit()">📤 সাবমিট করুন</button>
+    </div>
+  </div>`;
+  updateNotifBadge();
+};
+
+window.submitDeposit = async () => {
+  const amt = Number(H('depAmt').value||0);
+  const method = H('depMethod').value;
+  const txId = H('depTxId').value.trim();
+  if (amt < 100) { toast('ন্যূনতম ১০০ টাকা দিন','err'); return; }
+  if (!txId) { toast('ট্রানজেকশন আইডি দিন','err'); return; }
+  const btn = H('depBtn'); btn.disabled = true; btn.textContent = 'সাবমিট হচ্ছে...';
+  try {
+    await push(ref(db, `depositRequests`), {
+      uid: window._currentUID, amount: amt, method, txId,
+      status:'pending', ts: Date.now(), date:'এইমাত্র'
+    });
+    await push(ref(db, `notifications/${window._currentUID}`), {
+      msg:`⬇️ আপনার ৳${fmt(amt)} ডিপোজিট রিকোয়েস্ট পাঠানো হয়েছে। অনুমোদনের অপেক্ষায়।`,
+      seen:false, date:'এইমাত্র', ts:Date.now()
+    });
+    toast('ডিপোজিট রিকোয়েস্ট পাঠানো হয়েছে ✅','ok');
+    showPage('wallet');
+  } catch(e) { toast('সমস্যা হয়েছে','err'); }
+  btn.disabled = false; btn.textContent = '📤 সাবমিট করুন';
+};
+
+// ══ WITHDRAW ══
+window.renderWithdraw = async () => {
+  const u = await getUser();
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="back-btn" onclick="showPage('wallet')">← ফিরে যান</div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_withdraw')}</h2>
+    <div class="balance-card" style="padding:16px 20px;margin-bottom:16px">
+      <div class="balance-label">উপলব্ধ আর্নিং ব্যালেন্স</div>
+      <div class="balance-amt" style="font-size:28px">৳ ${fmt(u.earningBalance)}</div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.5)">শুধুমাত্র আর্নিং ব্যালেন্স থেকে উইথড্র করা যায়</div>
+    </div>
+    <div class="card">
+      <div class="form-group"><label>পরিমাণ (৳)</label><input id="witAmt" class="form-input" type="number" placeholder="ন্যূনতম ২০০"></div>
+      <div class="form-group"><label>পেমেন্ট পদ্ধতি</label>
+        <select id="witMethod" class="form-input"><option value="bkash">bKash</option><option value="nagad">Nagad</option></select>
+      </div>
+      <div class="form-group"><label>অ্যাকাউন্ট নম্বর</label><input id="witAccNum" class="form-input" type="tel" placeholder="01XXXXXXXXXX"></div>
+      <button class="btn btn-red" id="witBtn" onclick="submitWithdraw()">📤 উইথড্র করুন</button>
+    </div>
+    <div class="info-banner" style="margin-top:0">⚠️ উইথড্র প্রক্রিয়াকরণ ১-২৪ ঘণ্টা সময় নিতে পারে।</div>
+  </div>`;
+  updateNotifBadge();
+};
+
+window.submitWithdraw = async () => {
+  const amt = Number(H('witAmt').value||0);
+  const method = H('witMethod').value;
+  const acc = H('witAccNum').value.trim();
+  if (amt < 200) { toast('ন্যূনতম ২০০ টাকা','err'); return; }
+  if (!acc) { toast('অ্যাকাউন্ট নম্বর দিন','err'); return; }
+  const u = await getUser();
+  if (Number(u.earningBalance) < amt) { toast('পর্যাপ্ত আর্নিং ব্যালেন্স নেই','err'); return; }
+  const btn = H('witBtn'); btn.disabled = true; btn.textContent = 'প্রক্রিয়া হচ্ছে...';
+  try {
+    await push(ref(db, `withdrawRequests`), {
+      uid: window._currentUID, amount: amt, method, accNumber: acc,
+      status:'pending', ts: Date.now(), date:'এইমাত্র'
+    });
+    await push(ref(db, `notifications/${window._currentUID}`), {
+      msg:`⬆️ আপনার ৳${fmt(amt)} উইথড্র রিকোয়েস্ট পাঠানো হয়েছে।`,
+      seen:false, date:'এইমাত্র', ts:Date.now()
+    });
+    toast('উইথড্র রিকোয়েস্ট পাঠানো হয়েছে ✅','ok');
+    showPage('wallet');
+  } catch(e) { toast('সমস্যা হয়েছে','err'); }
+  btn.disabled = false; btn.textContent = '📤 উইথড্র করুন';
+};
+
+// ══ TRANSFER (Earning → Deposit) ══
+window.renderTransfer = async () => {
+  const u = await getUser();
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="back-btn" onclick="showPage('wallet')">← ফিরে যান</div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_transfer')}</h2>
+    <div class="info-banner">📌 আর্নিং ব্যালেন্স থেকে ডিপোজিট ব্যালেন্সে সরাসরি ট্রান্সফার করুন। ডিপোজিট ব্যালেন্স উইথড্র করা যায় না।</div>
+    <div class="stat-row">
+      <div class="stat-box"><div class="stat-lbl">আর্নিং ব্যালেন্স</div><div class="stat-val" style="color:var(--green)">৳${fmt(u.earningBalance)}</div></div>
+      <div class="stat-box"><div class="stat-lbl">ডিপোজিট ব্যালেন্স</div><div class="stat-val">৳${fmt(u.depositBalance)}</div></div>
+    </div>
+    <div class="card">
+      <div class="form-group"><label>পরিমাণ (৳)</label><input id="trfAmt" class="form-input" type="number" placeholder="ন্যূনতম ১০"></div>
+      <button class="btn btn-primary" id="trfBtn" onclick="submitTransfer()">🔁 ট্রান্সফার করুন</button>
+    </div>
+  </div>`;
+  updateNotifBadge();
+};
+
+window.submitTransfer = async () => {
+  const amt = Number(H('trfAmt').value||0);
+  if (amt < 10) { toast('ন্যূনতম ১০ টাকা দিন','err'); return; }
+  const btn = H('trfBtn'); btn.disabled = true; btn.textContent = 'প্রক্রিয়া হচ্ছে...';
+  try {
+    // ── SECURE BALANCE UPDATE ──
+    // earningBalance and depositBalance are moved in ONE transaction on the
+    // user node itself, so the deduction and the credit either both happen or
+    // neither does (no state where money leaves earning but never reaches
+    // deposit), and the funds check is re-verified at write time, not just
+    // from a stale cached read — this closes the double-submit / race window
+    // that a plain get() + update() has.
+    let insufficient = false;
+    const txRes = await runTransaction(ref(db, `users/${window._currentUID}`), (cur) => {
+      if (!cur) return cur; // user node missing — abort, nothing to do
+      const eb = Number(cur.earningBalance)||0;
+      if (eb < amt) { insufficient = true; return; } // abort transaction, no write
+      cur.earningBalance = eb - amt;
+      cur.depositBalance = (Number(cur.depositBalance)||0) + amt;
+      return cur;
+    });
+    if (insufficient || !txRes.committed) {
+      toast('পর্যাপ্ত আর্নিং ব্যালেন্স নেই','err');
+      btn.disabled = false; btn.textContent = '🔁 ট্রান্সফার করুন';
+      return;
+    }
+    const after = txRes.snapshot.val() || {};
+    const newEarning = Number(after.earningBalance)||0;
+    const newDeposit = Number(after.depositBalance)||0;
+    await push(ref(db, `balanceHistory/${window._currentUID}`), {
+      type:'debit', amount:amt, reason:'আর্নিং থেকে ডিপোজিটে ট্রান্সফার', balanceAfter:newEarning, date:'এইমাত্র', ts:Date.now()
+    });
+    await push(ref(db, `balanceHistory/${window._currentUID}`), {
+      type:'credit', amount:amt, reason:'আর্নিং থেকে ট্রান্সফার প্রাপ্ত', balanceAfter:newDeposit, date:'এইমাত্র', ts:Date.now()
+    });
+    toast('ট্রান্সফার সফল হয়েছে ✅','ok');
+    showPage('wallet');
+  } catch(e) { toast('সমস্যা হয়েছে','err'); }
+  btn.disabled = false; btn.textContent = '🔁 ট্রান্সফার করুন';
+};
+
+// ══ TRANSACTIONS ══
+window.renderTransactions = async () => {
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="back-btn" onclick="showPage('wallet')">← ফিরে যান</div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_transactions')}</h2>
+    <div id="txListBox"><div style="color:var(--text3);text-align:center;padding:30px">লোড হচ্ছে...</div></div>
+  </div>`;
+  const snap = await get(ref(db, `balanceHistory/${window._currentUID}`));
+  const hist = [];
+  if (snap.exists()) snap.forEach(c => { hist.push(c.val()); });
+  hist.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const box = H('txListBox');
+  if (!hist.length) { box.innerHTML='<p style="color:var(--text3);text-align:center;padding:30px">কোনো লেনদেন নেই</p>'; return; }
+  box.innerHTML = hist.map(h=>`
+    <div class="list-item">
+      <div class="li-left">
+        <div class="li-icon" style="background:${h.type==='credit'?'rgba(15,230,168,0.15)':'rgba(255,77,109,0.15)'}">${h.type==='credit'?'➕':'➖'}</div>
+        <div><div class="li-title">${h.reason||''}</div><div class="li-sub">${h.date||''} • ব্যালেন্স: ৳${fmt(h.balanceAfter)}</div></div>
+      </div>
+      <div class="li-amt" style="color:${h.type==='credit'?'var(--green)':'var(--red)'}">
+        ${h.type==='credit'?'+':'-'}৳${fmt(h.amount)}
+      </div>
+    </div>`).join('');
+};
+
+// ══ TEAM ══
+window.renderTeam = async () => {
+  const u = await getUser();
+  const myCode = u.referralCode || '';
+  const refLink = `${location.origin}${location.pathname}?ref=${myCode}`;
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="th-logo">Munafa<span>BD</span></div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_team')}</h2>
+    <div class="ref-card">
+      <div class="ref-card-title">🎁 রেফারেল প্রোগ্রাম</div>
+      <div class="ref-card-desc">প্রতিটি সফল রেফারেলে <strong style="color:var(--green)">৳৫০</strong> বোনাস পাবেন!</div>
+      <div class="ref-code-box">
+        <div class="ref-code-label">আপনার কোড</div>
+        <div class="ref-code-val">${myCode || 'কোড নেই'}</div>
+      </div>
+      <div class="ref-link-row" onclick="copyRefLink('${refLink}')">
+        <div class="ref-link-txt">${refLink}</div>
+        <button class="copy-btn-lg">📋 কপি</button>
+      </div>
+      <button class="btn btn-primary" style="margin-top:10px" onclick="shareRef('${refLink}')">📤 শেয়ার করুন</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-box"><div class="stat-lbl">মোট সদস্য</div><div class="stat-val" id="teamCount">—</div></div>
+      <div class="stat-box"><div class="stat-lbl">মোট আয়</div><div class="stat-val" style="color:var(--green)" id="teamEarn">—</div></div>
+    </div>
+    <div id="teamListBox"><div style="color:var(--text3);text-align:center;padding:20px">লোড হচ্ছে...</div></div>
+  </div>`;
+  updateNotifBadge();
+  const snap = await get(ref(db, 'users'));
+  let members = [];
+  if (snap.exists()) snap.forEach(c => {
+    const t = c.val();
+    if ((t.referrerUID === window._currentUID || t.referredBy === u.referralCode) && t.role !== 'admin')
+      members.push(t);
+  });
+  H('teamCount').textContent = fmt(members.length);
+  H('teamEarn').textContent = '৳' + fmt(members.length * 50);
+  const box = H('teamListBox');
+  if (!members.length) { box.innerHTML='<p style="color:var(--text3);text-align:center;padding:20px">এখনো কোনো সদস্য নেই</p>'; return; }
+  box.innerHTML = `<div class="sec-title">রেফার করা সদস্য</div>` + members.map(m=>`
+    <div class="list-item">
+      <div class="li-left">
+        <div class="li-icon" style="background:var(--surface3);font-size:16px;font-weight:700">${(m.name||'?')[0].toUpperCase()}</div>
+        <div><div class="li-title">${m.name||'নাম নেই'}</div><div class="li-sub">${m.phone||m.email||''}</div></div>
+      </div>
+      <div style="font-size:11px;color:${m.status==='active'?'var(--green)':'var(--red)'};font-weight:600">${m.status==='active'?'✅ সক্রিয়':'⛔ নিষ্ক্রিয়'}</div>
+    </div>`).join('');
+};
+
+window.copyRefLink = (link) => {
+  navigator.clipboard.writeText(link).then(()=>toast('লিংক কপি হয়েছে ✅','ok')).catch(()=>toast('কপি ব্যর্থ','err'));
+};
+window.shareRef = (link) => {
+  if(navigator.share) { navigator.share({ title:'MunafaBD', text:'MunafaBD-এ যোগ দিন!', url:link }); }
+  else { copyRefLink(link); }
+};
+
+// ══ NOTIFICATIONS ══
+window.renderNotifications = async () => {
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="back-btn" onclick="showPage('home')">← ফিরে যান</div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_notifications')}</h2>
+    <div id="notifList"><div style="color:var(--text3);text-align:center;padding:30px">লোড হচ্ছে...</div></div>
+  </div>`;
+  const snap = await get(ref(db, `notifications/${window._currentUID}`));
+  const list = [];
+  if (snap.exists()) snap.forEach(c => { list.push({key:c.key, ...c.val()}); });
+  list.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  const updates = {};
+  list.forEach(n => { if(!n.seen) updates[`notifications/${window._currentUID}/${n.key}/seen`] = true; });
+  if (Object.keys(updates).length) await update(ref(db), updates);
+  updateNotifBadge();
+  const box = H('notifList');
+  if (!list.length) { box.innerHTML='<p style="color:var(--text3);text-align:center;padding:30px">কোনো নোটিফিকেশন নেই</p>'; return; }
+  box.innerHTML = list.map(n=>`
+    <div class="notif-item ${n.seen?'':'unseen'}">
+      ${!n.seen?'<div class="notif-dot"></div>':'<div style="width:8px;flex-shrink:0"></div>'}
+      <div><div class="notif-msg">${n.msg}</div><div class="notif-date">${n.date||''}</div></div>
+    </div>`).join('');
+};
+
+// ══ LANGUAGE ══
+window.renderLanguagePage = async () => {
+  const current = window._lang || 'bn';
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="back-btn" onclick="showPage('home')">← ফিরে যান</div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('lang_page_title')}</h2>
+    <div class="card" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;${current==='en'?'border-color:var(--accent2)':''}" onclick="setLanguage('en')">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="font-size:26px">🇬🇧</div>
+        <div style="font-weight:600">English</div>
+      </div>
+      ${current==='en'?'<div style="color:var(--accent2);font-size:18px">✓</div>':''}
+    </div>
+    <div class="card" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;${current==='bn'?'border-color:var(--accent2)':''}" onclick="setLanguage('bn')">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="font-size:26px">🇧🇩</div>
+        <div style="font-weight:600">বাংলা (Bangla)</div>
+      </div>
+      ${current==='bn'?'<div style="color:var(--accent2);font-size:18px">✓</div>':''}
+    </div>
+  </div>`;
+};
+
+// ══ LOAN ══
+// Recomputes late fee / remaining amount for an active (approved) loan based on
+// elapsed time past dueTs and current settings, and persists the change so the
+// admin panel and this page always agree. Read-only for non-active loans.
+window.refreshLoanRecord = async (loan) => {
+  if (loan.status !== 'approved') { loan._isOverdue = false; return loan; }
+  const now = Date.now();
+  const dueTs = Number(loan.dueTs||0);
+  const daysOverdue = now > dueTs ? Math.floor((now-dueTs)/86400000) : 0;
+  const ctx = window._loanCtx || {};
+  const lateFeePct = Number(ctx.lateFeePercentPerDay||0);
+  const waived = !!loan.lateFeeWaived;
+  const newLateFee = (!waived && daysOverdue>0) ? Math.round(daysOverdue * lateFeePct/100 * Number(loan.totalRepayment||0)) : 0;
+  const totalDue = Number(loan.totalRepayment||0) + newLateFee;
+  const paid = Number(loan.paidAmount||0);
+  const newRemaining = Math.max(0, totalDue - paid);
+  const updates = {};
+  if (newLateFee !== Number(loan.lateFee||0)) updates.lateFee = newLateFee;
+  if (newRemaining !== Number(loan.remainingAmount||0)) updates.remainingAmount = newRemaining;
+  if (Object.keys(updates).length) {
+    try { await update(ref(db, `loanRequests/${loan.key}`), updates); } catch(e) {}
+    Object.assign(loan, updates);
+  }
+  loan._isOverdue = daysOverdue > 0 && newRemaining > 0;
+  loan._daysOverdue = daysOverdue;
+  return loan;
+};
+
+window.loanDisplayStatus = (l) => {
+  if (l.status === 'approved' && l._isOverdue) return 'overdue';
+  if (l.status === 'repaid') return 'paid'; // backward compat with older records
+  return l.status;
+};
+
+window.renderLoanPage = async () => {
+  H('mainContent').innerHTML = `<div class="page"><div class="skeleton-loader">⏳ লোড হচ্ছে...</div></div>`;
+
+  const [settingsSnap, reqSnap, myShareSnap] = await Promise.all([
+    get(ref(db, 'settings/loan')),
+    get(ref(db, `loanRequests`)),
+    get(ref(db, `myShares/${window._currentUID}`))
+  ]);
+
+  const u = await getUser();
+  const loanSettings = settingsSnap.exists() ? settingsSnap.val() : null;
+  const chargePct = Number(loanSettings && loanSettings.serviceChargePercent || 0);
+  const durationDays = Number(loanSettings && loanSettings.durationDays || 0);
+  const lateFeePercentPerDay = Number(loanSettings && loanSettings.lateFeePercentPerDay || 0);
+  const autoApprovalEnabled = !!(loanSettings && loanSettings.autoApprovalEnabled);
+  const minAccountAgeDays = Number(loanSettings && loanSettings.minAccountAgeDays || 0);
+  const eligibility = (loanSettings && loanSettings.eligibility) || {};
+
+  // ── LOAN LIMIT SYSTEM (single system: Starting Amount → grows on each full repayment) ──
+  // Every user's own loan limit begins at startingAmount (admin-set; stored lazily on
+  // users/$uid/loanCurrentLimit on first use) and increases by limitIncreasePerRepayment
+  // each time one of their loans reaches 'paid' status, capped at maxLimit. If the admin
+  // hasn't configured a Starting Amount yet, no loan limit exists and the loan option
+  // stays locked/hidden until they do.
+  const startingAmount = Number(loanSettings && loanSettings.startingAmount || 0);
+  const limitIncreasePerRepayment = Number(loanSettings && loanSettings.limitIncreasePerRepayment || 0);
+  const maxLimit = Number(loanSettings && loanSettings.maxLimit || 0);
+  const progressiveEnabled = startingAmount > 0;
+  const repaidCount = Number(u.loanRepaidCount || 0);
+
+  let userLoanLimit = 0;
+  if (progressiveEnabled) {
+    userLoanLimit = (u.loanCurrentLimit != null) ? Number(u.loanCurrentLimit) : startingAmount;
+    if (maxLimit > 0 && userLoanLimit > maxLimit) userLoanLimit = maxLimit;
+  }
+  let nextLoanLimit = userLoanLimit;
+  if (progressiveEnabled) {
+    nextLoanLimit = userLoanLimit + limitIncreasePerRepayment;
+    if (maxLimit > 0 && nextLoanLimit > maxLimit) nextLoanLimit = maxLimit;
+  }
+  const atMaxLimit = progressiveEnabled && maxLimit > 0 && userLoanLimit >= maxLimit;
+
+  // ── LOAN ELIGIBILITY PROGRESS ──
+  // Deposit total / real-referral count / withdraw count are counters maintained
+  // by the admin panel at approval time (users/$uid fields — cheap, owner-readable).
+  // Share count is read live from myShares/$uid (small subtree, always accurate).
+  let myShareCount = 0;
+  if (myShareSnap.exists()) myShareSnap.forEach(() => { myShareCount++; });
+  const myDeposit = Number(u.totalApprovedDeposit || 0);
+  const myReferral = Number(u.realReferralCount || 0);
+  const myWithdraw = Number(u.totalApprovedWithdraws || 0);
+
+  // Pull this user's loan requests
+  const myLoans = [];
+  if (reqSnap.exists()) reqSnap.forEach(c => { const v = c.val(); if (v.uid === window._currentUID) myLoans.push({ key: c.key, ...v }); });
+  myLoans.sort((a,b)=>(b.ts||0)-(a.ts||0));
+
+  window._loanCtx = {
+    chargePct, durationDays, lateFeePercentPerDay, autoApprovalEnabled, minAccountAgeDays, eligibility, myShareCount,
+    startingAmount, limitIncreasePerRepayment, maxLimit, progressiveEnabled, userLoanLimit, nextLoanLimit, repaidCount
+  };
+
+  // Refresh late-fee/remaining on any active loans before rendering
+  for (const l of myLoans) { if (l.status === 'approved') await refreshLoanRecord(l); }
+
+  const activeLoan = myLoans.find(l => l.status === 'approved');
+  const pendingLoan = myLoans.find(l => l.status === 'pending');
+  const blocking = activeLoan || pendingLoan;
+  const availableLimit = blocking ? 0 : userLoanLimit;
+  window._loanCtx.availableLimit = availableLimit;
+
+  const stColor = { pending:'var(--amber)', approved:'var(--green)', overdue:'var(--red)', paid:'var(--cyan)', rejected:'var(--red)' };
+  const stKey   = { pending:'loan_status_pending', approved:'loan_status_approved', overdue:'loan_status_overdue', paid:'loan_status_paid', rejected:'loan_status_rejected' };
+
+  let activeLoanHtml = '';
+  if (activeLoan) {
+    const totalDue = Number(activeLoan.totalRepayment||0) + Number(activeLoan.lateFee||0);
+    const paid = Number(activeLoan.paidAmount||0);
+    const remaining = activeLoan.remainingAmount != null ? Number(activeLoan.remainingAmount) : Math.max(0, totalDue - paid);
+    const isOverdue = !!activeLoan._isOverdue;
+    const dispStatus = isOverdue ? 'overdue' : 'approved';
+    activeLoanHtml = `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-weight:700;font-size:14px">${tr('loan_active_title')}</div>
+        <span class="pill" style="color:${stColor[dispStatus]};background:${stColor[dispStatus]}18;border:1px solid ${stColor[dispStatus]}40">${tr(stKey[dispStatus])}</span>
+      </div>
+      <div class="stat-row">
+        <div class="stat-box"><div class="stat-lbl">${tr('loan_total_amount')}</div><div class="stat-val">৳${fmt(totalDue)}</div></div>
+        <div class="stat-box"><div class="stat-lbl">${tr('loan_paid_amount')}</div><div class="stat-val" style="color:var(--green)">৳${fmt(paid)}</div></div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-box"><div class="stat-lbl">${tr('loan_remaining_amount')}</div><div class="stat-val" style="color:var(--red)">৳${fmt(remaining)}</div></div>
+        <div class="stat-box"><div class="stat-lbl">${tr('loan_due_date')}</div><div class="stat-val" style="font-size:13px">${activeLoan.dueDate||''}</div></div>
+      </div>
+      ${isOverdue ? `<div class="info-banner" style="border-color:rgba(255,77,109,0.3);background:rgba(255,77,109,0.08);color:var(--red)">⚠️ ${activeLoan._daysOverdue} ${tr('loan_days_short')} — ${tr('loan_overdue_notice')}</div>` : ''}
+      <button class="btn btn-red" id="payLoanBtn" onclick="togglePayForm()">${tr('loan_pay_btn')}</button>
+      <div id="payLoanForm" class="hidden" style="margin-top:12px">
+        <div class="form-group"><label>${tr('loan_pay_amount_label')}</label><input id="payAmt" class="form-input" type="number" value="${remaining}" max="${remaining}" min="1"></div>
+        <button class="btn btn-green" id="payConfirmBtn" onclick="payLoanConfirm('${activeLoan.key}')">${tr('loan_confirm_payment')}</button>
+      </div>
+    </div>`;
+  }
+
+  // ── LOAN ELIGIBILITY / RECOMMENDATION CHECKLIST ──
+  // Only requirements the admin has enabled show up here. Each row shows live
+  // progress ("current / required") plus a ✅/❌ complete flag. This is advisory:
+  // it doesn't block applying, it only predicts whether Auto-Approval will fire.
+  const eligRows = [];
+  if (eligibility.depositEnabled) {
+    const need = Number(eligibility.minDeposit || 0);
+    eligRows.push({ label: tr('loan_elig_deposit'), cur: `৳${fmt(myDeposit)}`, need: `৳${fmt(need)}`, ok: myDeposit >= need });
+  }
+  if (eligibility.referralEnabled) {
+    const need = Number(eligibility.minReferral || 0);
+    eligRows.push({ label: tr('loan_elig_referral'), cur: fmt(myReferral), need: fmt(need), ok: myReferral >= need });
+  }
+  if (eligibility.shareEnabled) {
+    const need = Number(eligibility.minShare || 0);
+    eligRows.push({ label: tr('loan_elig_share'), cur: fmt(myShareCount), need: fmt(need), ok: myShareCount >= need });
+  }
+  if (eligibility.withdrawEnabled) {
+    const need = Number(eligibility.minWithdraw || 0);
+    eligRows.push({ label: tr('loan_elig_withdraw'), cur: fmt(myWithdraw), need: fmt(need), ok: myWithdraw >= need });
+  }
+  const allEligOk = eligRows.every(r => r.ok);
+  window._loanCtx.eligibilityOk = allEligOk;
+
+  const eligibilityHtml = eligRows.length ? `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-weight:700;font-size:14px">${tr('loan_elig_title')}</div>
+        <span class="pill" style="color:${allEligOk?'var(--green)':'var(--amber)'};background:${allEligOk?'var(--green)':'var(--amber)'}18;border:1px solid ${allEligOk?'var(--green)':'var(--amber)'}40">${allEligOk?tr('loan_elig_ready'):tr('loan_elig_notready')}</span>
+      </div>
+      ${eligRows.map(r => `
+        <div class="list-item" style="background:var(--surface3)">
+          <div class="li-left"><div><div class="li-title">${r.label}</div><div class="li-sub">${r.cur} / ${r.need}</div></div></div>
+          <div style="font-size:18px">${r.ok ? '✅' : '❌'}</div>
+        </div>`).join('')}
+      ${!allEligOk ? `<div style="font-size:11px;color:var(--text3);margin-top:8px">${tr('loan_elig_hint')}</div>` : ''}
+    </div>` : '';
+
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="back-btn" onclick="showPage('home')">← ফিরে যান</div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <h2 style="margin-bottom:16px">${tr('h2_loan')}</h2>
+
+    <div class="balance-card" style="padding:18px 20px">
+      <div class="balance-label">${tr('loan_avail_limit')}</div>
+      <div class="balance-amt" style="font-size:28px">৳ ${fmt(availableLimit)}</div>
+      ${!userLoanLimit ? `<div style="font-size:11px;color:rgba(255,255,255,0.55)">${tr('loan_no_limit_set')}</div>` : ''}
+    </div>
+
+    ${progressiveEnabled ? `
+    <div class="card">
+      <div style="font-weight:700;font-size:14px;margin-bottom:12px">${tr('loan_progress_title')}</div>
+      <div class="stat-row">
+        <div class="stat-box"><div class="stat-lbl">${tr('loan_current_limit')}</div><div class="stat-val">৳${fmt(userLoanLimit)}</div></div>
+        <div class="stat-box"><div class="stat-lbl">${tr('loan_next_limit')}</div><div class="stat-val" style="color:var(--green)">${atMaxLimit ? tr('loan_max_limit_reached') : '৳'+fmt(nextLoanLimit)}</div></div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-box"><div class="stat-lbl">${tr('loan_repaid_count')}</div><div class="stat-val" style="color:var(--accent2)">${fmt(repaidCount)}</div></div>
+      </div>
+    </div>` : ''}
+
+    ${activeLoanHtml}
+
+    ${eligibilityHtml}
+
+    ${pendingLoan ? `<div class="info-banner" style="border-color:rgba(255,196,0,0.3);background:rgba(255,196,0,0.08)">${tr('loan_active_notice')}</div>` : ''}
+    ${(!blocking && userLoanLimit && !allEligOk) ? `<div class="info-banner" style="border-color:rgba(255,196,0,0.3);background:rgba(255,196,0,0.08)">${tr('loan_elig_locked_msg')}</div>` : ''}
+    ${!blocking && userLoanLimit && allEligOk ? `<div class="info-banner">${tr('loan_info_banner')}</div>` : ''}
+
+    ${(!blocking && userLoanLimit && allEligOk) ? `
+    <div class="card">
+      <div class="form-group">
+        <label>${tr('loan_amount_label')}</label>
+        <input id="loanAmt" class="form-input" type="number" placeholder="${tr('loan_amount_ph')}" min="1" max="${userLoanLimit}" oninput="updateLoanCalc()">
+      </div>
+      <div class="list-item" style="background:var(--surface3)">
+        <div class="li-left"><div><div class="li-title">${tr('loan_service_charge')} (${chargePct}%)</div></div></div>
+        <div class="li-amt" id="loanServiceOut">৳ 0</div>
+      </div>
+      <div class="list-item" style="background:var(--surface3)">
+        <div class="li-left"><div><div class="li-title">${tr('loan_total_repayment')}</div></div></div>
+        <div class="li-amt" style="color:var(--accent2)" id="loanTotalOut">৳ 0</div>
+      </div>
+      <div class="list-item" style="background:var(--surface3);margin-bottom:16px">
+        <div class="li-left"><div><div class="li-title">${tr('loan_due_date')}</div></div></div>
+        <div class="li-amt" id="loanDueOut">—</div>
+      </div>
+      <button class="btn btn-primary" id="loanApplyBtn" onclick="submitLoanApplication()">${tr('loan_apply_btn')}</button>
+    </div>` : ''}
+
+    <div class="sec-title">${tr('loan_my_history')}</div>
+    <div id="loanHistBox">
+      ${myLoans.length ? myLoans.map(l => {
+        const ds = loanDisplayStatus(l);
+        const totalDue = Number(l.totalRepayment||0) + Number(l.lateFee||0);
+        return `
+        <div class="list-item">
+          <div class="li-left">
+            <div class="li-icon" style="background:${stColor[ds]}22">🏦</div>
+            <div><div class="li-title">৳${fmt(l.amount)} • ${tr('loan_total_repayment')} ৳${fmt(totalDue)}</div><div class="li-sub">${tr('loan_due_date')}: ${l.dueDate||''}</div></div>
+          </div>
+          <div class="li-amt" style="color:${stColor[ds]};font-size:12px">${tr(stKey[ds]||'loan_status_pending')}</div>
+        </div>`;
+      }).join('') : `<div class="card" style="text-align:center;padding:24px;color:var(--text3)">${tr('loan_no_history')}</div>`}
+    </div>
+  </div>`;
+  updateNotifBadge();
+};
+
+window.togglePayForm = () => {
+  const f = H('payLoanForm'); if (f) f.classList.toggle('hidden');
+};
+
+window.updateLoanCalc = () => {
+  const ctx = window._loanCtx || {};
+  const amtEl = H('loanAmt');
+  const amt = Number(amtEl ? amtEl.value : 0) || 0;
+  const service = Math.round(amt * (ctx.chargePct||0) / 100);
+  const total = amt + service;
+  const due = new Date(Date.now() + (ctx.durationDays||0) * 86400000);
+  const dueStr = due.toLocaleDateString(window._lang==='en' ? 'en-GB' : 'bn-BD', { year:'numeric', month:'short', day:'numeric' });
+  const sOut = H('loanServiceOut'), tOut = H('loanTotalOut'), dOut = H('loanDueOut');
+  if (sOut) sOut.textContent = '৳ ' + fmt(service);
+  if (tOut) tOut.textContent = '৳ ' + fmt(total);
+  if (dOut) dOut.textContent = amt > 0 ? dueStr : '—';
+};
+
+// Loan eligibility for auto-approval: account age, active status, and no
+// currently-overdue prior loan. Manual admin review is always the fallback
+// when auto-approval is off or the user doesn't qualify.
+window.submitLoanApplication = async () => {
+  const ctx = window._loanCtx || {};
+  if (ctx.eligibilityOk === false) { toast(tr('loan_elig_locked_msg'), 'err'); return; }
+  const amt = Number((H('loanAmt')||{}).value || 0);
+  if (!amt || amt <= 0) { toast(tr('loan_enter_amount'), 'err'); return; }
+  if (amt > ctx.availableLimit) { toast(tr('loan_exceeds'), 'err'); return; }
+  const service = Math.round(amt * (ctx.chargePct||0) / 100);
+  const total = amt + service;
+  const dueTs = Date.now() + (ctx.durationDays||0) * 86400000;
+  const dueStr = new Date(dueTs).toLocaleDateString(window._lang==='en' ? 'en-GB' : 'bn-BD', { year:'numeric', month:'short', day:'numeric' });
+
+  const btn = H('loanApplyBtn'); if (btn) { btn.disabled = true; btn.textContent = tr('loan_processing'); }
+  try {
+    const u = await getUser();
+    const accountAgeDays = (Date.now() - Number(u.createdAt||0)) / 86400000;
+    const ageOk = accountAgeDays >= Number(ctx.minAccountAgeDays||0);
+    const activityOk = u.status === 'active';
+
+    // Previous repayment history — disqualify auto-approval if any past loan is currently overdue
+    let hasOverdueHistory = false;
+    const allLoansSnap = await get(ref(db, 'loanRequests'));
+    if (allLoansSnap.exists()) {
+      const now = Date.now();
+      allLoansSnap.forEach(c => {
+        const v = c.val();
+        if (v.uid === window._currentUID && v.status === 'approved') {
+          const due = Number(v.dueTs||0);
+          const rem = v.remainingAmount != null ? Number(v.remainingAmount) : Number(v.totalRepayment||0);
+          if (now > due && rem > 0) hasOverdueHistory = true;
+        }
+      });
+    }
+    // Extra eligibility requirements admin can toggle on/off (deposit total, real
+    // referral count, share-buy count, withdraw count). A disabled requirement is
+    // always treated as satisfied — only ON requirements gate auto-approval.
+    const elig = ctx.eligibility || {};
+    const depositOk = !elig.depositEnabled || Number(u.totalApprovedDeposit||0) >= Number(elig.minDeposit||0);
+    const referralOk = !elig.referralEnabled || Number(u.realReferralCount||0) >= Number(elig.minReferral||0);
+    const shareOk = !elig.shareEnabled || Number(ctx.myShareCount||0) >= Number(elig.minShare||0);
+    const withdrawOk = !elig.withdrawEnabled || Number(u.totalApprovedWithdraws||0) >= Number(elig.minWithdraw||0);
+
+    const eligible = ageOk && activityOk && !hasOverdueHistory && depositOk && referralOk && shareOk && withdrawOk;
+    const autoApprove = !!ctx.autoApprovalEnabled && eligible;
+
+    const loanData = {
+      uid: window._currentUID, amount: amt, serviceChargePercent: ctx.chargePct||0,
+      serviceCharge: service, totalRepayment: total, durationDays: ctx.durationDays||0,
+      dueDate: dueStr, dueTs, ts: Date.now(), date: 'এইমাত্র',
+      paidAmount: 0, remainingAmount: total, lateFee: 0, lateFeeWaived: false,
+      autoApproved: autoApprove,
+      status: autoApprove ? 'approved' : 'pending'
+    };
+    if (autoApprove) loanData.approvedAt = Date.now();
+
+    await push(ref(db, 'loanRequests'), loanData);
+
+    if (autoApprove) {
+      const txRes = await runTransaction(ref(db, `users/${window._currentUID}/earningBalance`), (cur) => (Number(cur)||0) + amt);
+      const newBal = Number(txRes.snapshot.val()||0);
+      await push(ref(db, `balanceHistory/${window._currentUID}`), { type:'credit', amount:amt, reason:'লোন স্বয়ংক্রিয় অনুমোদিত', balanceAfter:newBal, date:'এইমাত্র', ts:Date.now() });
+      await push(ref(db, `notifications/${window._currentUID}`), { msg:`🎉 আপনার ৳${fmt(amt)} লোন স্বয়ংক্রিয়ভাবে অনুমোদিত হয়েছে এবং ওয়ালেটে যোগ হয়েছে!`, seen:false, date:'এইমাত্র', ts:Date.now() });
+      toast(tr('loan_auto_approved_msg'), 'ok');
+    } else {
+      await push(ref(db, `notifications/${window._currentUID}`), { msg:`🏦 আপনার ৳${fmt(amt)} লোন রিকোয়েস্ট পাঠানো হয়েছে। অনুমোদনের অপেক্ষায়।`, seen:false, date:'এইমাত্র', ts:Date.now() });
+      toast(tr('loan_applied_ok'), 'ok');
+    }
+    renderLoanPage();
+  } catch (e) {
+    toast('সমস্যা হয়েছে', 'err');
+    if (btn) { btn.disabled = false; btn.textContent = tr('loan_apply_btn'); }
+  }
+};
+
+window.payLoanConfirm = async (key) => {
+  const amt = Number((H('payAmt')||{}).value || 0);
+  if (!amt || amt <= 0) { toast(tr('loan_enter_amount'), 'err'); return; }
+  const btn = H('payConfirmBtn'); if (btn) { btn.disabled = true; btn.textContent = tr('loan_processing'); }
+  try {
+    const [loanSnap, u] = await Promise.all([ get(ref(db, `loanRequests/${key}`)), getUser() ]);
+    if (!loanSnap.exists()) { toast('লোন পাওয়া যায়নি', 'err'); if (btn) { btn.disabled=false; btn.textContent=tr('loan_confirm_payment'); } return; }
+    const loan = loanSnap.val();
+    const totalDue = Number(loan.totalRepayment||0) + Number(loan.lateFee||0);
+    const remaining = loan.remainingAmount != null ? Number(loan.remainingAmount) : Math.max(0, totalDue - Number(loan.paidAmount||0));
+    if (amt > remaining + 0.01) { toast(tr('loan_pay_exceeds_remaining'), 'err'); if (btn) { btn.disabled=false; btn.textContent=tr('loan_confirm_payment'); } return; }
+    if (Number(u.earningBalance||0) < amt) { toast(tr('loan_insufficient_balance'), 'err'); if (btn) { btn.disabled=false; btn.textContent=tr('loan_confirm_payment'); } return; }
+
+    // ── SECURE BALANCE UPDATE ── deduct wallet inside a transaction so the
+    // sufficient-funds check is re-verified against the live value.
+    let insufficient = false;
+    const txRes = await runTransaction(ref(db, `users/${window._currentUID}/earningBalance`), (cur) => {
+      const c = Number(cur)||0;
+      if (c < amt) { insufficient = true; return; }
+      return c - amt;
+    });
+    if (insufficient || !txRes.committed) { toast(tr('loan_insufficient_balance'), 'err'); if (btn) { btn.disabled=false; btn.textContent=tr('loan_confirm_payment'); } return; }
+    const newBal = Number(txRes.snapshot.val()||0);
+
+    const newPaid = Number(loan.paidAmount||0) + amt;
+    const newRemaining = Math.max(0, totalDue - newPaid);
+    const newStatus = newRemaining <= 0 ? 'paid' : 'approved';
+    const updates = { paidAmount:newPaid, remainingAmount:newRemaining, status:newStatus };
+    if (newStatus === 'paid') updates.paidAt = Date.now();
+    await update(ref(db, `loanRequests/${key}`), updates);
+    await push(ref(db, `loanRequests/${key}/payments`), { amount:amt, ts:Date.now(), date:'এইমাত্র' });
+
+    // ── LOAN LIMIT UPGRADE ON FULL REPAYMENT ──
+    // Fires exactly once, the moment a loan flips to 'paid'. Always tracks the
+    // repayment count; only grows the actual limit when the admin has turned on
+    // the progressive system (startingAmount > 0), capped at maxLimit.
+    if (newStatus === 'paid') {
+      const ctx = window._loanCtx || {};
+      try { await runTransaction(ref(db, `users/${window._currentUID}/loanRepaidCount`), (cur) => (Number(cur)||0) + 1); } catch(e) {}
+      if (Number(ctx.startingAmount||0) > 0) {
+        const inc = Number(ctx.limitIncreasePerRepayment||0);
+        const cap = Number(ctx.maxLimit||0);
+        const startAmt = Number(ctx.startingAmount||0);
+        try {
+          await runTransaction(ref(db, `users/${window._currentUID}/loanCurrentLimit`), (cur) => {
+            const base = (cur != null) ? Number(cur) : startAmt;
+            let next = base + inc;
+            if (cap > 0 && next > cap) next = cap;
+            return next;
+          });
+        } catch(e) {}
+      }
+    }
+    await push(ref(db, `balanceHistory/${window._currentUID}`), { type:'debit', amount:amt, reason:'লোন পরিশোধ', balanceAfter:newBal, date:'এইমাত্র', ts:Date.now() });
+    await push(ref(db, `notifications/${window._currentUID}`), {
+      msg: newStatus==='paid' ? `✅ আপনার লোন সম্পূর্ণ পরিশোধ হয়েছে! 🎉` : `💰 আপনি ৳${fmt(amt)} লোন পরিশোধ করেছেন। বাকি: ৳${fmt(newRemaining)}`,
+      seen:false, date:'এইমাত্র', ts:Date.now()
+    });
+    toast(tr('loan_payment_success'), 'ok');
+    renderLoanPage();
+  } catch (e) {
+    toast('সমস্যা হয়েছে', 'err');
+    if (btn) { btn.disabled = false; btn.textContent = tr('loan_confirm_payment'); }
+  }
+};
+
+// ══ PROFILE ══
+window.renderProfile = async () => {
+  const u = await getUser();
+  H('mainContent').innerHTML = `
+  <div class="top-header">
+    <div class="th-left"><div class="th-logo">Munafa<span>BD</span></div></div>
+    <div class="th-right"><div class="ib" data-action="showPage" data-arg="notifications">🔔<div class="badge hidden" id="notifBadge">0</div></div></div>
+  </div>
+  <div class="page">
+    <div class="card" style="text-align:center;padding:28px">
+      <div class="profile-avatar">${u.name[0].toUpperCase()}</div>
+      <div style="font-weight:700;font-size:18px;margin-bottom:3px">${u.name}</div>
+      <div style="color:var(--text2);font-size:13px;margin-bottom:6px">${u.email}</div>
+      ${u.referralCode ? `<div style="font-size:12px;color:var(--cyan);font-weight:600;margin-bottom:8px">🔖 ${tr('profile_code')}: ${u.referralCode}</div>` : ''}
+      <div class="pill" style="background:${u.status==='active'?'rgba(15,230,168,0.15)':'rgba(255,77,109,0.15)'};color:${u.status==='active'?'var(--green)':'var(--red)'}">
+        ${u.status==='active'?'✅ '+tr('home_active'):'⛔ '+tr('home_inactive')}
+      </div>
+    </div>
+    <div class="stat-row">
+      <div class="stat-box"><div class="stat-lbl">${tr('profile_earning_bal')}</div><div class="stat-val" style="color:var(--green)">৳${fmt(u.earningBalance)}</div></div>
+      <div class="stat-box"><div class="stat-lbl">${tr('profile_deposit_bal')}</div><div class="stat-val">৳${fmt(u.depositBalance)}</div></div>
+    </div>
+    <div class="stat-row">
+      <div class="stat-box"><div class="stat-lbl">${tr('profile_joined')}</div><div class="stat-val" style="font-size:13px">${u.createdAt ? new Date(u.createdAt).toLocaleDateString('bn-BD') : '—'}</div></div>
+      <div class="stat-box"><div class="stat-lbl">${tr('profile_status')}</div><div class="stat-val" style="font-size:13px;color:${u.status==='active'?'var(--green)':'var(--red)'}">${u.status==='active'?'✅ '+tr('home_active'):'⛔ '+tr('home_inactive')}</div></div>
+    </div>
+    <div class="card">
+      <div class="form-group"><label>${tr('profile_name')}</label><input id="pfName" class="form-input" value="${u.name}"></div>
+      <div class="form-group"><label>${tr('profile_phone')}</label><input id="pfPhone" class="form-input" value="${u.phone||''}"></div>
+      <div class="form-group"><label>${tr('profile_email')}</label><input class="form-input" value="${u.email}" disabled></div>
+      <button class="btn btn-primary" id="pfSaveBtn" onclick="saveProfile()">${tr('profile_save')}</button>
+    </div>
+    <button class="btn btn-surface" onclick="doLogout()" style="margin-top:4px">${tr('profile_logout')}</button>
+  </div>`;
+  updateNotifBadge();
+};
+
+window.saveProfile = async () => {
+  const name = H('pfName').value.trim();
+  const phone = H('pfPhone').value.trim();
+  if (!name) { toast('নাম দিন','err'); return; }
+  const btn = H('pfSaveBtn'); btn.disabled = true; btn.textContent = 'সংরক্ষণ হচ্ছে...';
+  try {
+    await update(ref(db, `users/${window._currentUID}`), {name, phone});
+    toast('প্রোফাইল আপডেট হয়েছে ✅','ok');
+    renderProfile();
+  } catch(e) { toast('সমস্যা হয়েছে','err'); }
+  if(btn){ btn.disabled = false; btn.textContent = '💾 সংরক্ষণ করুন'; }
+};
+</script>
+
+<script>
+window.genUsername = () => {
+  const firstNames = ['James','John','Robert','Michael','William','David','Joseph','Charles','Thomas','Daniel','Matthew','Andrew','Joshua','Christopher','Ryan','Emma','Olivia','Sophia','Isabella','Mia','Charlotte','Amelia','Harper','Emily','Abigail','Madison','Elizabeth','Sofia','Avery','Ella','Noah','Liam','Ethan','Mason','Logan','Lucas','Aiden','Jackson','Sarah','Grace','Lily','Chloe','Victoria','Zoe','Natalie','Hannah'];
+  const lastNames = ['Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis','Wilson','Taylor','Anderson','Thomas','Jackson','White','Harris','Martin','Thompson','Moore','Young','Allen','King','Wright','Scott','Green','Baker','Adams','Nelson','Hill','Carter','Mitchell','Roberts','Turner','Phillips','Campbell','Parker','Evans','Edwards','Collins','Stewart','Morris','Murphy','Rivera','Cook','Rogers','Morgan'];
+  const first = firstNames[Math.floor(Math.random()*firstNames.length)];
+  const last  = lastNames[Math.floor(Math.random()*lastNames.length)];
+  return first + last;
+};
+window.genPassword = () => {
+  const chars='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  let s=''; for(let i=0;i<10;i++) s+=chars[Math.floor(Math.random()*chars.length)];
+  return s+'@'+Math.floor(10+Math.random()*90);
+};
+</script>
+
+<style>
+:root{
+  --bg:#04010a;--surface:#0d0520;--surface2:#160a35;--surface3:#1e1048;
+  --border:rgba(130,80,255,0.15);--border2:rgba(130,80,255,0.3);
+  --accent:#6314c8;--accent2:#a855f7;--green:#06d6a0;--red:#f43f5e;
+  --amber:#f59e0b;--cyan:#38bdf8;--text:#ede9ff;--text2:#9d8ec7;--text3:#4a3d75;
+  --r:16px;--r-sm:11px;--r-lg:24px;
+  --g1:linear-gradient(135deg,#6314c8,#a855f7);
+  --g2:linear-gradient(135deg,#38bdf8,#6314c8);
+  --g3:linear-gradient(135deg,#06d6a0,#38bdf8);
+  --g4:linear-gradient(135deg,#f59e0b,#f43f5e);
+  --shadow:0 16px 56px rgba(99,20,200,0.35);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overscroll-behavior:none;}
+body{font-family:'Inter',sans-serif;color:var(--text);min-height:100vh;overflow-x:hidden;
+  background:#06020f;-webkit-font-smoothing:antialiased;}
+body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:radial-gradient(ellipse at 10% 0%,rgba(99,20,200,0.55) 0%,transparent 50%),
+  radial-gradient(ellipse at 90% 5%,rgba(20,180,220,0.25) 0%,transparent 45%),
+  radial-gradient(ellipse at 80% 95%,rgba(140,50,250,0.35) 0%,transparent 45%),
+  radial-gradient(ellipse at 5% 95%,rgba(15,200,150,0.18) 0%,transparent 40%),
+  linear-gradient(170deg,#04010a 0%,#0e0622 40%,#04010a 100%);}
+h1,h2,h3,h4{font-family:'Space Grotesk',sans-serif;}
+.hidden{display:none!important;}
+#loading{position:fixed;top:0;left:0;width:100%;height:100%;background:var(--bg);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;}
+.spin{width:44px;height:44px;border:2.5px solid rgba(130,80,255,0.18);border-top-color:var(--accent2);border-right-color:var(--cyan);border-radius:50%;animation:spin .75s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;}
+.auth-box{width:100%;max-width:420px;background:linear-gradient(160deg,rgba(22,10,53,0.97),rgba(13,5,32,0.97));border:1px solid rgba(168,85,247,0.25);border-radius:var(--r-lg);padding:30px 24px;box-shadow:0 24px 64px rgba(99,20,200,0.4),0 0 0 1px rgba(168,85,247,0.1);backdrop-filter:blur(20px);position:relative;overflow:hidden;}
+.auth-box::before{content:'';position:absolute;top:-60px;right:-60px;width:180px;height:180px;background:radial-gradient(circle,rgba(217,70,239,0.3),transparent 70%);pointer-events:none;}
+.logo{font-family:'Space Grotesk',sans-serif;font-size:26px;font-weight:700;margin-bottom:4px;}
+.logo span{background:var(--g1);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+.auth-sub{color:var(--text2);font-size:13px;margin-bottom:22px;}
+.auth-tabs{display:flex;gap:6px;margin-bottom:20px;background:var(--surface2);border-radius:var(--r-sm);padding:4px;}
+.auth-tab{flex:1;padding:9px;border-radius:8px;border:none;background:none;color:var(--text2);font-size:13px;font-weight:500;cursor:pointer;transition:all .2s;font-family:'Inter',sans-serif;}
+.auth-tab.active{background:var(--g1);color:#fff;box-shadow:0 4px 14px rgba(124,58,237,0.4);}
+.field{margin-bottom:12px;}
+.field label{display:block;font-size:11px;font-weight:600;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px;}
+.field input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);padding:11px 14px;color:var(--text);font-size:14px;font-family:'Inter',sans-serif;transition:border .2s;-webkit-appearance:none;}
+.field input:focus{outline:none;border-color:var(--accent2);box-shadow:0 0 0 3px rgba(217,70,239,0.12);}
+.field input::placeholder{color:var(--text3);}
+.btn{width:100%;padding:13px;border-radius:var(--r-sm);border:none;font-size:14px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;transition:all .2s;-webkit-appearance:none;}
+.btn-primary{background:var(--g1);color:#fff;box-shadow:0 6px 22px rgba(124,58,237,0.4);}
+.btn-green{background:var(--g3);color:#03201a;box-shadow:0 6px 20px rgba(15,230,168,0.35);}
+.btn-red{background:linear-gradient(135deg,#ff4d6d,#ff7eb3);color:#fff;}
+.btn-surface{background:var(--surface2);color:var(--text2);border:1px solid var(--border2);}
+.btn-accent2{background:var(--g2);color:#fff;}
+.btn:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.08);}
+.btn:active{transform:scale(0.97);}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none;filter:none;}
+
+/* ── TOP HEADER ── */
+.top-header{position:sticky;top:0;z-index:300;height:58px;background:rgba(13,5,32,0.95);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);border-bottom:1px solid rgba(130,80,255,0.18);display:flex;align-items:center;justify-content:space-between;padding:0 18px;box-shadow:0 1px 20px rgba(99,20,200,0.18);}
+.th-logo{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;}
+.th-logo span{background:var(--g1);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+.th-left{display:flex;align-items:center;min-width:0;flex:1;}
+.th-right{display:flex;align-items:center;gap:8px;flex-shrink:0;}
+.ib{width:36px;height:36px;border-radius:50%;background:var(--surface2);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;position:relative;}
+.badge{position:absolute;top:1px;right:1px;width:16px;height:16px;border-radius:50%;background:var(--red);font-size:9px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center;border:2px solid var(--bg);}
+
+/* FIX 2: Back button always visible */
+.back-btn{display:inline-flex !important;align-items:center;gap:6px;padding:7px 12px;border-radius:var(--r-sm);background:var(--surface2);border:1px solid var(--border2);color:var(--text2);cursor:pointer;font-size:12px;font-weight:500;white-space:nowrap;flex-shrink:0;-webkit-appearance:none;text-decoration:none;}
+
+.welcome-banner{position:relative;overflow:hidden;background:linear-gradient(135deg,rgba(99,20,200,0.4),rgba(168,85,247,0.2),rgba(56,189,248,0.1));border:1px solid rgba(168,85,247,0.35);border-radius:var(--r-lg);padding:22px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 8px 32px rgba(99,20,200,0.25);}
+.wb-glow{position:absolute;top:-40px;right:-40px;width:160px;height:160px;background:radial-gradient(circle,rgba(168,85,247,0.4),rgba(56,189,248,0.15),transparent 70%);pointer-events:none;}
+.wb-content{position:relative;}
+.wb-greet{font-size:12px;color:rgba(255,255,255,0.6);margin-bottom:3px;}
+.wb-name{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;margin-bottom:4px;}
+.wb-bal{font-size:13px;color:rgba(255,255,255,0.7);}
+.wb-bal strong{color:var(--green);}
+.wb-avatar{width:52px;height:52px;border-radius:50%;background:var(--g1);display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;flex-shrink:0;}
+.status-banner{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--r-sm);margin-bottom:14px;font-size:13px;font-weight:500;}
+.status-active{background:rgba(15,230,168,0.08);border:1px solid rgba(15,230,168,0.3);color:var(--green);}
+.status-inactive{background:rgba(255,77,109,0.08);border:1px solid rgba(255,77,109,0.3);color:var(--red);}
+.status-dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex-shrink:0;}
+.timer-card{background:linear-gradient(135deg,rgba(56,189,248,0.08),rgba(99,20,200,0.12));border:1px solid rgba(56,189,248,0.2);border-radius:var(--r-lg);padding:22px 16px;margin-bottom:16px;text-align:center;box-shadow:0 4px 24px rgba(56,189,248,0.08);}
+.timer-card-title{font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:14px;}
+.timer-blocks{display:flex;align-items:center;justify-content:center;gap:8px;}
+.t-block{display:flex;flex-direction:column;align-items:center;gap:5px;}
+.t-num{font-family:'Space Grotesk',sans-serif;font-size:30px;font-weight:700;color:var(--cyan);background:rgba(56,189,248,0.07);border:1px solid rgba(56,189,248,0.18);border-radius:12px;width:60px;height:54px;display:flex;align-items:center;justify-content:center;}
+.t-lbl{font-size:10px;color:var(--text3);font-weight:600;}
+.t-sep{font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:700;color:var(--cyan);opacity:0.5;margin-bottom:18px;}
+.timer-sub{font-size:11px;color:var(--text3);margin-top:14px;}
+.notice-wrap{display:flex;align-items:center;background:rgba(255,176,32,0.06);border:1px solid rgba(255,176,32,0.2);border-radius:var(--r-sm);margin-bottom:16px;overflow:hidden;}
+.notice-tag{padding:10px 12px;background:rgba(255,176,32,0.12);font-size:14px;flex-shrink:0;border-right:1px solid rgba(255,176,32,0.15);}
+.notice-scroll{flex:1;overflow:hidden;white-space:nowrap;}
+.marquee-inner{display:inline-block;animation:marquee 22s linear infinite;font-size:12px;color:var(--amber);font-weight:500;padding:10px 0;}
+@keyframes marquee{from{transform:translateX(100%)}to{transform:translateX(-100%)}}
+.sec-title{font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;margin-top:4px;}
+.icon-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;}
+.ig-item{display:flex;flex-direction:column;align-items:center;gap:7px;cursor:pointer;padding:14px 4px;border-radius:var(--r);transition:transform .15s,box-shadow .15s;background:linear-gradient(160deg,rgba(22,10,53,0.9),rgba(13,5,32,0.9));border:1px solid rgba(130,80,255,0.18);-webkit-tap-highlight-color:transparent;touch-action:manipulation;user-select:none;-webkit-user-select:none;box-shadow:0 4px 16px rgba(0,0,0,0.3);}
+.ig-item:active{transform:scale(0.88);box-shadow:0 2px 8px rgba(0,0,0,0.2);opacity:0.9;}
+.ig-icon{width:46px;height:46px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:20px;}
+.ig-lbl{font-size:10px;font-weight:600;color:var(--text2);text-align:center;letter-spacing:0.2px;}
+.fb-icon{background:linear-gradient(135deg,#1877f2,#0d5cbf);}
+.ig-icon-bg{background:linear-gradient(135deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888);}
+.wallet-icon{background:linear-gradient(135deg,#7c3aed,#d946ef);}
+.dep-icon{background:linear-gradient(135deg,#0fe6a8,#22d3ee);}
+.wit-icon{background:linear-gradient(135deg,#ff4d6d,#ff7eb3);}
+.team-icon{background:linear-gradient(135deg,#22d3ee,#7c3aed);}
+.tx-icon{background:linear-gradient(135deg,#ffb020,#ff7c00);}
+.buyshare-icon{background:linear-gradient(135deg,#f43f5e,#f59e0b);}
+.myshare-icon{background:linear-gradient(135deg,#8b5cf6,#38bdf8);}
+.lang-icon{background:linear-gradient(135deg,#06b6d4,#3b82f6);}
+.loan-icon{background:linear-gradient(135deg,#10b981,#84cc16);}
+.transfer-icon{background:linear-gradient(135deg,#38bdf8,#0fe6a8);}
+.bs-card{position:relative;border-radius:var(--r-lg);overflow:hidden;background:var(--surface2);border:1px solid var(--border2);box-shadow:0 8px 32px rgba(0,0,0,0.35);}
+.bs-thumb{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;}
+.bs-title-bar{position:absolute;top:10px;left:10px;max-width:60%;background:rgba(4,1,10,0.6);backdrop-filter:blur(6px);color:#fff;padding:6px 12px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.bs-timer{position:absolute;top:10px;right:10px;background:var(--g4);color:#fff;padding:6px 11px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.3px;box-shadow:0 4px 14px rgba(244,63,94,0.4);}
+.page{max-width:100%;padding:14px 14px calc(72px + var(--safe-bottom));}
+.card{background:linear-gradient(150deg,rgba(22,10,53,0.88),rgba(13,5,32,0.88));border:1px solid rgba(130,80,255,0.16);border-radius:var(--r);padding:18px;margin-bottom:14px;backdrop-filter:blur(16px);box-shadow:0 4px 24px rgba(0,0,0,0.25);}
+.balance-card{background:linear-gradient(135deg,#1a0840,#2e1060,#1a0840);border:1px solid rgba(124,58,237,0.4);border-radius:var(--r-lg);padding:24px;margin-bottom:16px;position:relative;overflow:hidden;}
+.balance-label{font-size:11px;color:rgba(255,255,255,0.5);font-weight:500;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;}
+.balance-amt{font-family:'Space Grotesk',sans-serif;font-size:36px;font-weight:700;background:var(--g1);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px;}
+.wallet-actions{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:18px;}
+.wa-btn{display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);cursor:pointer;transition:all .2s;}
+.wa-btn:active{transform:scale(0.95);}
+.wa-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;}
+.wa-lbl{font-size:11px;font-weight:600;color:var(--text2);}
+.list-item{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:linear-gradient(150deg,rgba(22,10,53,0.85),rgba(13,5,32,0.85));border-radius:var(--r);margin-bottom:10px;border:1px solid rgba(130,80,255,0.14);}
+.li-left{display:flex;align-items:center;gap:10px;flex:1;min-width:0;}
+.li-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
+.li-title{font-weight:600;font-size:13px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.li-sub{font-size:10px;color:var(--text3);}
+.li-amt{font-family:'Space Grotesk',sans-serif;font-size:14px;font-weight:700;white-space:nowrap;flex-shrink:0;margin-left:8px;}
+.stat-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;}
+.stat-box{background:linear-gradient(150deg,rgba(22,10,53,0.85),rgba(13,5,32,0.85));border:1px solid rgba(130,80,255,0.15);border-radius:var(--r);padding:16px;}
+.stat-lbl{font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;}
+.stat-val{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;}
+.form-group{margin-bottom:12px;}
+.form-group label{display:block;font-size:11px;font-weight:600;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px;}
+.form-input{width:100%;background:rgba(22,10,53,0.7);border:1px solid rgba(130,80,255,0.2);border-radius:var(--r-sm);padding:12px 14px;color:var(--text);font-size:14px;font-family:'Inter',sans-serif;-webkit-appearance:none;}
+.form-input:focus{outline:none;border-color:var(--accent2);box-shadow:0 0 0 3px rgba(168,85,247,0.15);}
+.form-input::placeholder{color:var(--text3);}
+.form-input option{background:var(--surface2);}
+.ref-card{background:linear-gradient(135deg,rgba(124,58,237,0.2),rgba(34,211,238,0.12));border:1px solid rgba(124,58,237,0.35);border-radius:var(--r-lg);padding:20px;margin-bottom:14px;}
+.ref-card-title{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:700;margin-bottom:6px;}
+.ref-card-desc{font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.5;}
+.ref-code-box{background:var(--surface3);border:1px solid var(--border2);border-radius:var(--r-sm);padding:12px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;}
+.ref-code-label{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;}
+.ref-code-val{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;color:var(--cyan);letter-spacing:2px;}
+.ref-link-row{display:flex;align-items:center;gap:10px;background:var(--surface3);border:1px solid var(--border2);border-radius:var(--r-sm);padding:10px 12px;cursor:pointer;}
+.ref-link-txt{flex:1;font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.copy-btn-lg{padding:6px 12px;border-radius:8px;border:none;background:var(--g2);color:#fff;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;}
+.notif-item{display:flex;gap:12px;padding:14px 16px;border-radius:var(--r);margin-bottom:10px;border:1px solid rgba(130,80,255,0.14);background:linear-gradient(150deg,rgba(22,10,53,0.85),rgba(13,5,32,0.85));}
+.notif-item.unseen{border-color:rgba(168,85,247,0.35);background:rgba(99,20,200,0.1);box-shadow:0 0 0 1px rgba(168,85,247,0.1);}
+.notif-dot{width:8px;height:8px;border-radius:50%;background:linear-gradient(135deg,var(--accent2),var(--cyan));margin-top:4px;flex-shrink:0;box-shadow:0 0 6px rgba(168,85,247,0.6);}
+.notif-msg{font-size:13px;line-height:1.55;margin-bottom:3px;}
+.notif-date{font-size:10px;color:var(--text3);}
+.pill{display:inline-flex;align-items:center;gap:3px;padding:4px 12px;border-radius:50px;font-size:11px;font-weight:700;}
+.info-banner{background:rgba(124,58,237,0.08);border:1px solid rgba(124,58,237,0.2);border-radius:var(--r-sm);padding:12px 14px;font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:14px;}
+.pay-method{display:flex;align-items:center;gap:14px;padding:14px;background:var(--surface3);border-radius:var(--r-sm);border:1px solid var(--border);}
+.pay-method.active{border-color:rgba(217,70,239,0.4);}
+.pay-logo{font-weight:800;font-size:12px;padding:5px 9px;border-radius:8px;flex-shrink:0;}
+.bkash-logo{background:#e2136e;color:#fff;}
+.nagad-logo{background:#ef372a;color:#fff;}
+.profile-avatar{width:68px;height:68px;border-radius:50%;background:var(--g1);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;margin:0 auto 12px;}
+.skeleton-loader{text-align:center;padding:40px;color:var(--text3);}
+
+/* ── POPUP - Mobile Compatible ── */
+.popup-bg{
+  position:fixed;inset:0;
+  background:rgba(4,1,14,0.88);
+  z-index:9000;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:16px;
+  padding-top:max(16px, env(safe-area-inset-top));
+  padding-bottom:max(16px, env(safe-area-inset-bottom));
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+  overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+}
+.popup-box{
+  background:linear-gradient(160deg,rgba(22,10,53,0.99),rgba(13,5,32,0.99));
+  border:1px solid rgba(168,85,247,0.28);
+  border-radius:var(--r-lg);
+  padding:26px;
+  max-width:420px;
+  width:100%;
+  text-align:center;
+  box-shadow:0 24px 64px rgba(99,20,200,0.4),0 0 0 1px rgba(168,85,247,0.1);
+  max-height:90dvh;
+  overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+  position:relative;
+}
+.popup-icon{font-size:46px;margin-bottom:10px;}
+.popup-title{font-family:'Space Grotesk',sans-serif;font-size:19px;font-weight:700;margin-bottom:8px;}
+.popup-msg{font-size:13px;color:var(--text2);line-height:1.6;margin-bottom:18px;}
+
+/* ── BOTTOM NAV ── */
+.bottom-nav{position:fixed;bottom:0;left:0;right:0;z-index:200;height:calc(64px + var(--safe-bottom));padding-bottom:var(--safe-bottom);background:rgba(13,5,32,0.97);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);border-top:1px solid rgba(130,80,255,0.2);display:flex;align-items:center;justify-content:space-around;padding-left:4px;padding-right:4px;box-shadow:0 -4px 24px rgba(99,20,200,0.2);}
+.nav-item{display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 10px;border-radius:var(--r-sm);cursor:pointer;transition:all .22s;color:var(--text3);font-size:9px;font-weight:600;min-width:52px;}
+.nav-item .ni{font-size:21px;transition:all .22s;}
+.nav-item.active{color:var(--accent2);background:rgba(168,85,247,0.1);border-radius:var(--r-sm);}
+.nav-item.active .ni{transform:scale(1.18);}
+
+@media(max-width:380px){
+  .icon-grid{gap:6px;}
+  .ig-icon{width:40px;height:40px;font-size:18px;}
+  .ig-lbl{font-size:9px;}
+  .t-num{width:50px;height:48px;font-size:26px;}
+  .t-sep{font-size:20px;}
+  .cred-label{min-width:60px;}
+}
+</style>
+</head>
+<body>
+<div id="loading">
+  <div style="text-align:center">
+    <div style="font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px;margin-bottom:6px">
+      Munafa<span style="background:linear-gradient(135deg,#6314c8,#a855f7,#38bdf8);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">BD</span>
+    </div>
+    <div style="font-size:11px;color:#4a3d75;font-weight:500;letter-spacing:2px;text-transform:uppercase;margin-bottom:28px">Premium Platform</div>
+  </div>
+  <div class="spin"></div>
+  <div style="color:#4a3d75;font-size:11px;margin-top:8px;letter-spacing:0.5px">সংযোগ হচ্ছে...</div>
+</div>
+<div id="authScreen" class="hidden">
+<div class="auth-wrap">
+<div class="auth-box">
+  <div class="logo">Munafa<span>BD</span></div>
+  <div class="auth-sub" id="authSubText">আপনার অ্যাকাউন্টে লগইন করুন</div>
+  <div class="auth-tabs">
+    <button class="auth-tab active" id="tabLogin" onclick="switchTab('login')">লগইন</button>
+    <button class="auth-tab" id="tabRegister" onclick="switchTab('register')">রেজিস্ট্রার</button>
+  </div>
+  <div id="loginForm">
+    <div class="field"><label>ইমেইল</label><input id="loginEmail" type="email" placeholder="your@email.com" autocomplete="email"></div>
+    <div class="field"><label>পাসওয়ার্ড</label><input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password"></div>
+    <button class="btn btn-primary" id="loginBtn" onclick="doLogin()" style="margin-top:6px">লগইন করুন →</button>
+  </div>
+  <div id="registerForm" class="hidden">
+    <div class="field"><label>পুরো নাম</label><input id="regName" placeholder="আপনার নাম" autocomplete="name"></div>
+    <div class="field"><label>ফোন নম্বর</label><input id="regPhone" type="tel" placeholder="017XXXXXXXX" autocomplete="tel"></div>
+    <div class="field"><label>ইমেইল</label><input id="regEmail" type="email" placeholder="your@email.com" autocomplete="email"></div>
+    <div class="field"><label>পাসওয়ার্ড</label><input id="regPass" type="password" placeholder="কমপক্ষে ৬ অক্ষর" autocomplete="new-password"></div>
+    <div class="field"><label>রেফারেল কোড (ঐচ্ছিক)</label><input id="regRef" placeholder="CI-XXXXXXXX"></div>
+    <button class="btn btn-primary" id="regBtn" onclick="doRegister()" style="margin-top:6px">অ্যাকাউন্ট তৈরি করুন →</button>
+  </div>
+</div>
+</div>
+</div>
+<div id="app" class="hidden">
+  <div id="mainContent"></div>
+  <div class="bottom-nav">
+    <div class="nav-item active" id="nav-home" onclick="showPage('home')"><div class="ni">🏠</div><span>হোম</span></div>
+    <div class="nav-item" id="nav-wallet" onclick="showPage('wallet')"><div class="ni">💰</div><span>ওয়ালেট</span></div>
+    <div class="nav-item" id="nav-team" onclick="showPage('team')"><div class="ni">👥</div><span>টিম</span></div>
+    <div class="nav-item" id="nav-profile" onclick="showPage('profile')"><div class="ni">👤</div><span>প্রোফাইল</span></div>
+  </div>
+</div>
+<div id="popupContainer"></div>
+
+<!-- MOBILE & ONCLICK FIX -->
+<script>
+(function(){
+  function waitAndBind(){
+    if(typeof window.showPage!=='function'){ setTimeout(waitAndBind,80); return; }
+    // Bottom nav
+    document.querySelectorAll('.nav-item').forEach(function(el){
+      var fn=el.getAttribute('onclick'); if(!fn) return;
+      el.removeAttribute('onclick');
+      function h(e){ if(e.cancelable) e.preventDefault(); try{eval(fn);}catch(err){} }
+      window.bindTap(el, h);
+    });
+    // Auth buttons
+    ['loginBtn','regBtn','tabLogin','tabRegister'].forEach(function(id){
+      var el=document.getElementById(id); if(!el) return;
+      var fn=el.getAttribute('onclick'); if(!fn) return;
+      el.removeAttribute('onclick');
+      function h(e){ if(e.cancelable) e.preventDefault(); try{eval(fn);}catch(err){} }
+      window.bindTap(el, h);
+    });
+    // Delegate data-action (document-level — tracks its own touchstart position
+    // so a scroll that starts on or passes over a data-action element isn't
+    // mistaken for a tap on it)
+    document.addEventListener('click',function(e){
+      var el=e.target.closest('[data-action]'); if(!el) return;
+      handleAction(el);
+    });
+    var _daStartX=0,_daStartY=0,_daMoved=false;
+    document.addEventListener('touchstart',function(e){
+      var t=e.changedTouches[0]; _daStartX=t.clientX; _daStartY=t.clientY; _daMoved=false;
+    },{passive:true});
+    document.addEventListener('touchmove',function(e){
+      var t=e.changedTouches[0];
+      if(Math.abs(t.clientX-_daStartX)>10 || Math.abs(t.clientY-_daStartY)>10) _daMoved=true;
+    },{passive:true});
+    document.addEventListener('touchend',function(e){
+      var el=e.target.closest('[data-action]'); if(!el) return;
+      if(_daMoved) return;
+      e.preventDefault();
+      handleAction(el);
+    },{passive:false});
+  }
+  function handleAction(el){
+    var a=el.getAttribute('data-action'), arg=el.getAttribute('data-arg')||'';
+    if(a==='showPage'&&window.showPage) window.showPage(arg);
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',waitAndBind);
+  else waitAndBind();
+})();
+</script>
+</body>
+</html>
